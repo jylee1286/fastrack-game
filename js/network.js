@@ -1,4 +1,32 @@
 // Network Manager - PeerJS P2P Multiplayer
+const ICE_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    // Open Relay TURN servers (free, by Metered)
+    { urls: 'stun:stun.relay.metered.ca:80' },
+    {
+        urls: 'turn:global.relay.metered.ca:80',
+        username: 'e8dd65b92f6aee9de4a54917',
+        credential: '5VpEpiKnhp/rJugL'
+    },
+    {
+        urls: 'turn:global.relay.metered.ca:80?transport=tcp',
+        username: 'e8dd65b92f6aee9de4a54917',
+        credential: '5VpEpiKnhp/rJugL'
+    },
+    {
+        urls: 'turn:global.relay.metered.ca:443',
+        username: 'e8dd65b92f6aee9de4a54917',
+        credential: '5VpEpiKnhp/rJugL'
+    },
+    {
+        urls: 'turns:global.relay.metered.ca:443?transport=tcp',
+        username: 'e8dd65b92f6aee9de4a54917',
+        credential: '5VpEpiKnhp/rJugL'
+    }
+];
+
 class NetworkManager {
     constructor() {
         this.peer = null;
@@ -11,9 +39,8 @@ class NetworkManager {
         this.onDisconnected = null;
     }
 
-    // Generate a 6-character alphanumeric room code
     generateRoomCode() {
-        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No ambiguous chars (0/O, 1/I)
         let code = '';
         for (let i = 0; i < 6; i++) {
             code += chars.charAt(Math.floor(Math.random() * chars.length));
@@ -21,46 +48,36 @@ class NetworkManager {
         return code;
     }
 
-    // Create a new game (host)
     createGame(onConnected, onDataReceived, onDisconnected) {
         this.isHost = true;
         this.onConnected = onConnected;
         this.onDataReceived = onDataReceived;
         this.onDisconnected = onDisconnected;
-
-        // Generate room code
         this.roomCode = this.generateRoomCode();
 
-        // Create peer with room code as ID
         this.peer = new Peer('fastrack-' + this.roomCode, {
-            debug: 2,
-            config: {
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' },
-                    { urls: 'stun:stun2.l.google.com:19302' },
-                    { urls: 'stun:stun3.l.google.com:19302' }
-                ]
-            }
+            debug: 1,
+            config: { iceServers: ICE_SERVERS }
         });
 
         this.peer.on('open', (id) => {
-            console.log('Host peer created with ID:', id);
+            console.log('Host peer ready:', id);
         });
 
         this.peer.on('connection', (conn) => {
-            console.log('Incoming connection from:', conn.peer);
+            console.log('Opponent connected');
             this.conn = conn;
             this.setupConnection();
         });
 
         this.peer.on('error', (err) => {
-            console.error('Peer error:', err);
-            // If the ID is taken, try with a new code
+            console.error('Host peer error:', err.type, err);
             if (err.type === 'unavailable-id') {
+                // ID taken, regenerate
                 this.roomCode = this.generateRoomCode();
                 this.peer.destroy();
-                return this.createGame(this.onConnected, this.onDataReceived, this.onDisconnected);
+                this.createGame(this.onConnected, this.onDataReceived, this.onDisconnected);
+                return;
             }
             if (this.onDisconnected) {
                 this.onDisconnected('Connection error: ' + err.type);
@@ -70,109 +87,100 @@ class NetworkManager {
         return this.roomCode;
     }
 
-    // Join an existing game
     joinGame(roomCode, onConnected, onDataReceived, onDisconnected) {
         this.isHost = false;
-        this.roomCode = roomCode.toUpperCase();
+        this.roomCode = roomCode.toUpperCase().trim();
         this.onConnected = onConnected;
         this.onDataReceived = onDataReceived;
         this.onDisconnected = onDisconnected;
 
-        // Create peer
         this.peer = new Peer({
-            debug: 2,
-            config: {
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' },
-                    { urls: 'stun:stun2.l.google.com:19302' },
-                    { urls: 'stun:stun3.l.google.com:19302' }
-                ]
-            }
+            debug: 1,
+            config: { iceServers: ICE_SERVERS }
         });
 
-        // Set a connection timeout
         const connectTimeout = setTimeout(() => {
             if (!this.connected) {
                 console.error('Connection timed out');
                 if (this.onDisconnected) {
-                    this.onDisconnected('Connection timed out. Check the room code and try again.');
+                    this.onDisconnected('Connection timed out. Make sure the host has created the game and the code is correct.');
                 }
             }
-        }, 15000);
+        }, 20000);
 
         this.peer.on('open', (id) => {
-            console.log('Joiner peer created with ID:', id);
-            console.log('Connecting to host:', 'fastrack-' + this.roomCode);
-            // Connect to host
+            console.log('Joiner peer ready:', id);
+            console.log('Connecting to:', 'fastrack-' + this.roomCode);
+            
             this.conn = this.peer.connect('fastrack-' + this.roomCode, {
                 reliable: true
             });
-            this.setupConnection();
             
-            // Clear timeout on successful connection setup
             this.conn.on('open', () => {
                 clearTimeout(connectTimeout);
             });
+            
+            this.setupConnection();
         });
 
         this.peer.on('error', (err) => {
             clearTimeout(connectTimeout);
-            console.error('Peer error:', err);
+            console.error('Join peer error:', err.type, err);
+            
             let msg = 'Failed to connect';
             if (err.type === 'peer-unavailable') {
                 msg = 'Room not found. Check the code and make sure the host is waiting.';
             } else if (err.type === 'network') {
-                msg = 'Network error. Check your internet connection.';
+                msg = 'Network error. Check your internet connection and try again.';
             } else if (err.type === 'server-error') {
                 msg = 'Server error. Try again in a moment.';
+            } else if (err.type === 'disconnected') {
+                msg = 'Disconnected from server. Retrying...';
+                // Try to reconnect
+                setTimeout(() => this.peer.reconnect(), 2000);
+                return;
             }
+            
             if (this.onDisconnected) {
                 this.onDisconnected(msg);
             }
         });
     }
 
-    // Set up connection event handlers
     setupConnection() {
+        if (!this.conn) return;
+        
         this.conn.on('open', () => {
-            console.log('Connection established');
+            console.log('Connection established!');
             this.connected = true;
-            if (this.onConnected) {
-                this.onConnected();
-            }
+            if (this.onConnected) this.onConnected();
         });
 
         this.conn.on('data', (data) => {
-            if (this.onDataReceived) {
-                this.onDataReceived(data);
-            }
+            if (this.onDataReceived) this.onDataReceived(data);
         });
 
         this.conn.on('close', () => {
             console.log('Connection closed');
             this.connected = false;
-            if (this.onDisconnected) {
-                this.onDisconnected('Opponent disconnected');
-            }
+            if (this.onDisconnected) this.onDisconnected('Opponent disconnected');
         });
 
         this.conn.on('error', (err) => {
             console.error('Connection error:', err);
-            if (this.onDisconnected) {
-                this.onDisconnected('Connection error');
-            }
         });
     }
 
-    // Send data to opponent
     send(data) {
-        if (this.connected && this.conn) {
-            this.conn.send(data);
+        if (this.connected && this.conn && this.conn.open) {
+            try {
+                this.conn.send(data);
+            } catch (e) {
+                console.error('Send error:', e);
+            }
         }
     }
 
-    // Disconnect and cleanup
     disconnect() {
         if (this.conn) {
             this.conn.close();
@@ -187,5 +195,4 @@ class NetworkManager {
     }
 }
 
-// Create global network manager instance
 const network = new NetworkManager();

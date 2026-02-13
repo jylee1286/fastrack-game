@@ -56,10 +56,10 @@ class FastrackGame {
         return this.isHost ? this.joinerColor : this.hostColor;
     }
     
-    // Which side is "my" side (where I don't want pucks)
-    // Host = bottom, Joiner = top
+    // Every player always sees THEIR side at the bottom of the screen
+    // We flip rendering for the joiner
     get mySideIsBottom() {
-        return this.isHost;
+        return true; // Always true — we flip the board for the joiner
     }
     
     setupCanvas() {
@@ -187,21 +187,19 @@ class FastrackGame {
     }
     
     handleTimeUp() {
-        // Count pucks on each player's side
         const centerY = this.boardHeight / 2;
         let pucksOnMySide = 0;
         let pucksOnOpponentSide = 0;
         
         for (const puck of this.allPucks) {
             const onBottom = puck.position.y > centerY;
-            const onTop = puck.position.y < centerY;
             
-            if (this.mySideIsBottom) {
+            if (this.isHost) {
                 if (onBottom) pucksOnMySide++;
-                else if (onTop) pucksOnOpponentSide++;
+                else pucksOnOpponentSide++;
             } else {
-                if (onTop) pucksOnMySide++;
-                else if (onBottom) pucksOnOpponentSide++;
+                if (!onBottom) pucksOnMySide++;
+                else pucksOnOpponentSide++;
             }
         }
         
@@ -358,14 +356,14 @@ class FastrackGame {
     }
     
     // Determine if a puck is currently on my side and thus I can move it
+    // In game coords: host's side = bottom, joiner's side = top
     canIMovePuck(puck) {
         const centerY = this.boardHeight / 2;
-        const onBottom = puck.position.y > centerY;
-        const onTop = puck.position.y < centerY;
-        
-        if (this.mySideIsBottom && onBottom) return true;
-        if (!this.mySideIsBottom && onTop) return true;
-        return false;
+        if (this.isHost) {
+            return puck.position.y > centerY; // Host controls bottom
+        } else {
+            return puck.position.y < centerY; // Joiner controls top
+        }
     }
     
     // Update puck colors based on which side they're on
@@ -390,14 +388,31 @@ class FastrackGame {
         }
     }
     
+    // Convert screen coords to game coords (flip Y for joiner)
+    screenToGame(screenX, screenY) {
+        if (!this.isHost) {
+            return { x: screenX, y: this.boardHeight - screenY };
+        }
+        return { x: screenX, y: screenY };
+    }
+    
+    // Convert game coords to screen coords (flip Y for joiner)
+    gameToScreen(gameX, gameY) {
+        if (!this.isHost) {
+            return { x: gameX, y: this.boardHeight - gameY };
+        }
+        return { x: gameX, y: gameY };
+    }
+    
     handlePointerDown(e) {
         if (!this.gameStarted) return;
         
         const rect = this.canvas.getBoundingClientRect();
         const scaleX = this.boardWidth / rect.width;
         const scaleY = this.boardHeight / rect.height;
-        const x = (e.clientX - rect.left) * scaleX;
-        const y = (e.clientY - rect.top) * scaleY;
+        const rawX = (e.clientX - rect.left) * scaleX;
+        const rawY = (e.clientY - rect.top) * scaleY;
+        const { x, y } = this.screenToGame(rawX, rawY);
         
         // Check if clicked on a puck that's on MY side
         for (const puck of this.allPucks) {
@@ -422,10 +437,10 @@ class FastrackGame {
         const rect = this.canvas.getBoundingClientRect();
         const scaleX = this.boardWidth / rect.width;
         const scaleY = this.boardHeight / rect.height;
-        this.mousePos = {
-            x: (e.clientX - rect.left) * scaleX,
-            y: (e.clientY - rect.top) * scaleY
-        };
+        const rawX = (e.clientX - rect.left) * scaleX;
+        const rawY = (e.clientY - rect.top) * scaleY;
+        const { x, y } = this.screenToGame(rawX, rawY);
+        this.mousePos = { x, y };
     }
     
     handlePointerUp(e) {
@@ -459,28 +474,20 @@ class FastrackGame {
     
     handleNetworkData(data) {
         if (data.type === 'pucks') {
-            // Full sync — update all puck positions from opponent's perspective
-            // Opponent sends their view, we need to mirror Y coordinates
+            // Opponent sends their puck positions in their game coords
+            // Both players share the same coordinate system (host's perspective)
+            // so no flipping needed for physics — the flip is only visual
             if (data.positions) {
                 data.positions.forEach((pos, i) => {
                     if (i < this.allPucks.length) {
-                        // Mirror the position since opponent sees the board flipped
-                        Matter.Body.setPosition(this.allPucks[i], {
-                            x: pos.x,
-                            y: this.boardHeight - pos.y
-                        });
+                        Matter.Body.setPosition(this.allPucks[i], { x: pos.x, y: pos.y });
                     }
                 });
             }
         } else if (data.type === 'flick') {
-            // Opponent flicked a puck
             const puck = this.allPucks.find(p => p.puckIndex === data.index);
             if (puck) {
-                // Mirror the velocity
-                Matter.Body.setVelocity(puck, {
-                    x: data.vx,
-                    y: -data.vy
-                });
+                Matter.Body.setVelocity(puck, { x: data.vx, y: data.vy });
             }
         } else if (data.type === 'goal') {
             this.playSound(600, 0.15);
@@ -511,7 +518,7 @@ class FastrackGame {
         for (const puck of this.allPucks) {
             const onBottom = puck.position.y > centerY;
             
-            if (this.mySideIsBottom) {
+            if (this.isHost) {
                 if (onBottom) pucksOnMySide++;
                 else pucksOnOpponentSide++;
             } else {
@@ -600,6 +607,13 @@ class FastrackGame {
         // Keep pucks in bounds
         this.constrainPucks();
         
+        // Flip canvas for joiner so their side is at bottom
+        ctx.save();
+        if (!this.isHost) {
+            ctx.translate(0, h);
+            ctx.scale(1, -1);
+        }
+        
         // Wood background
         ctx.fillStyle = '#C4933F';
         ctx.fillRect(0, 0, w, h);
@@ -614,24 +628,10 @@ class FastrackGame {
             ctx.stroke();
         }
         
-        // My side highlight (subtle tint)
+        // My side highlight (bottom half is always "my side" visually)
         const centerY = h / 2;
-        ctx.fillStyle = this.mySideIsBottom
-            ? 'rgba(255, 50, 50, 0.05)'
-            : 'rgba(50, 100, 255, 0.05)';
-        ctx.fillRect(0, this.mySideIsBottom ? centerY : 0, w, h / 2);
-        
-        // "YOUR SIDE" label
-        ctx.save();
-        ctx.font = '14px "Open Sans"';
-        ctx.textAlign = 'center';
-        ctx.fillStyle = 'rgba(255,255,255,0.25)';
-        if (this.mySideIsBottom) {
-            ctx.fillText('YOUR SIDE', w / 2, h - 25);
-        } else {
-            ctx.fillText('YOUR SIDE', w / 2, 30);
-        }
-        ctx.restore();
+        ctx.fillStyle = 'rgba(255, 50, 50, 0.05)';
+        ctx.fillRect(0, centerY, w, h / 2);
         
         // Checkered borders (top and bottom racing stripes)
         this.drawRacingStripe(0, 0, w, 10);
@@ -655,6 +655,19 @@ class FastrackGame {
         
         // Draw pucks
         this.drawPucks();
+        
+        // Restore canvas transform
+        ctx.restore();
+        
+        // Draw side labels (NOT flipped — always readable)
+        ctx.save();
+        ctx.font = '14px "Open Sans"';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.fillText('YOUR SIDE', w / 2, h - 25);
+        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+        ctx.fillText('OPPONENT', w / 2, 30);
+        ctx.restore();
         
         // Sync
         this.syncPucks();
@@ -745,6 +758,7 @@ class FastrackGame {
         const ctx = this.ctx;
         
         for (const puck of this.allPucks) {
+            // Puck positions are in game coords — canvas is already flipped for joiner
             const x = puck.position.x;
             const y = puck.position.y;
             const r = this.puckRadius;
