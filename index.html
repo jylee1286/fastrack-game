@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FASTRACK - Online Multiplayer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Russo+One&family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <!-- Home Screen -->
+    <div id="home-screen" class="screen active">
+        <div class="container">
+            <h1 class="title">FASTRACK</h1>
+            <p class="subtitle">Online Multiplayer</p>
+            <div class="button-group">
+                <button id="create-btn" class="btn btn-primary">Create Game</button>
+                <button id="join-btn" class="btn btn-secondary">Join Game</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Join Screen -->
+    <div id="join-screen" class="screen">
+        <div class="container">
+            <h2 class="screen-title">Join Game</h2>
+            <input type="text" id="room-code-input" placeholder="Enter room code" maxlength="6" autocomplete="off">
+            <div class="button-group">
+                <button id="join-submit-btn" class="btn btn-primary">Join</button>
+                <button id="join-back-btn" class="btn btn-secondary">Back</button>
+            </div>
+            <div id="join-error" class="error-message"></div>
+        </div>
+    </div>
+
+    <!-- Lobby Screen -->
+    <div id="lobby-screen" class="screen">
+        <div class="container">
+            <h2 class="screen-title">Waiting for Opponent...</h2>
+            <div class="room-code-container">
+                <div class="room-code-label">Room Code:</div>
+                <div id="room-code-display" class="room-code">------</div>
+                <button id="copy-code-btn" class="btn btn-small">Copy Code</button>
+            </div>
+            <div class="loading-animation">
+                <div class="dot"></div>
+                <div class="dot"></div>
+                <div class="dot"></div>
+            </div>
+            <button id="lobby-cancel-btn" class="btn btn-secondary">Cancel</button>
+        </div>
+    </div>
+
+    <!-- Game Screen -->
+    <div id="game-screen" class="screen">
+        <div id="game-ui">
+            <div class="score-panel">
+                <div class="player-score player-you">
+                    <span class="score-label">You:</span>
+                    <span id="your-score" class="score-value">5</span>
+                </div>
+                <div class="player-score player-opponent">
+                    <span class="score-label">Opponent:</span>
+                    <span id="opponent-score" class="score-value">5</span>
+                </div>
+            </div>
+        </div>
+        <canvas id="game-canvas"></canvas>
+        <div id="aim-indicator" class="aim-indicator"></div>
+    </div>
+
+    <!-- Win/Lose Screen -->
+    <div id="result-screen" class="screen">
+        <div class="container">
+            <h1 id="result-title" class="result-title">YOU WIN!</h1>
+            <div class="button-group">
+                <button id="play-again-btn" class="btn btn-primary">Play Again</button>
+                <button id="result-home-btn" class="btn btn-secondary">Main Menu</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <script src="js/network.js"></script>
+    <script src="js/game.js"></script>
+    <script src="js/ui.js"></script>
+</body>
+</html>

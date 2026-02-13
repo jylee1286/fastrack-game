@@ -1,0 +1,19 @@
+{
+  "name": "fastrack-game",
+  "version": "1.0.0",
+  "description": "Online multiplayer version of the Fastrack board game",
+  "main": "index.html",
+  "scripts": {
+    "start": "serve .",
+    "build": "echo 'No build step required'"
+  },
+  "keywords": [
+    "fastrack",
+    "multiplayer",
+    "game",
+    "peerjs",
+    "matter.js"
+  ],
+  "author": "Jeremy Lee",
+  "license": "MIT"
+}
