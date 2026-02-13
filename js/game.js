@@ -8,8 +8,17 @@ class FastrackGame {
         // Game state
         this.isHost = false;
         this.gameStarted = false;
-        this.myPucks = [];
-        this.opponentPucks = [];
+        this.allPucks = []; // All pucks in one array
+        this.goldenGoal = false;
+        
+        // Timer
+        this.gameDuration = 60; // 1 minute
+        this.timeRemaining = 60;
+        this.timerInterval = null;
+        
+        // Colors
+        this.hostColor = '#ff3333';
+        this.joinerColor = '#3366ff';
         
         // Physics
         this.engine = null;
@@ -20,7 +29,7 @@ class FastrackGame {
         this.boardWidth = 800;
         this.boardHeight = 600;
         this.puckRadius = 20;
-        this.slotWidth = this.puckRadius * 3; // 1.5x diameter
+        this.slotWidth = this.puckRadius * 3;
         this.wallThickness = 10;
         
         // Interaction
@@ -30,7 +39,7 @@ class FastrackGame {
         
         // Network sync
         this.lastSyncTime = 0;
-        this.syncInterval = 33; // ~30 updates/sec
+        this.syncInterval = 33;
         
         // Sound
         this.audioContext = null;
@@ -39,11 +48,24 @@ class FastrackGame {
         this.setupInput();
     }
     
+    get myColor() {
+        return this.isHost ? this.hostColor : this.joinerColor;
+    }
+    
+    get opponentColor() {
+        return this.isHost ? this.joinerColor : this.hostColor;
+    }
+    
+    // Which side is "my" side (where I don't want pucks)
+    // Host = bottom, Joiner = top
+    get mySideIsBottom() {
+        return this.isHost;
+    }
+    
     setupCanvas() {
-        // Make canvas responsive but maintain aspect ratio
         const resizeCanvas = () => {
             const maxWidth = window.innerWidth;
-            const maxHeight = window.innerHeight - 100; // Leave room for UI
+            const maxHeight = window.innerHeight - 120;
             const scale = Math.min(maxWidth / this.boardWidth, maxHeight / this.boardHeight, 1);
             
             this.canvas.width = this.boardWidth;
@@ -57,21 +79,18 @@ class FastrackGame {
     }
     
     setupInput() {
-        // Mouse/touch events
         this.canvas.addEventListener('mousedown', (e) => this.handlePointerDown(e));
         this.canvas.addEventListener('mousemove', (e) => this.handlePointerMove(e));
         this.canvas.addEventListener('mouseup', (e) => this.handlePointerUp(e));
         
         this.canvas.addEventListener('touchstart', (e) => {
             e.preventDefault();
-            const touch = e.touches[0];
-            this.handlePointerDown(touch);
+            this.handlePointerDown(e.touches[0]);
         }, { passive: false });
         
         this.canvas.addEventListener('touchmove', (e) => {
             e.preventDefault();
-            const touch = e.touches[0];
-            this.handlePointerMove(touch);
+            this.handlePointerMove(e.touches[0]);
         }, { passive: false });
         
         this.canvas.addEventListener('touchend', (e) => {
@@ -83,30 +102,173 @@ class FastrackGame {
     startGame(isHost) {
         this.isHost = isHost;
         this.gameStarted = true;
+        this.goldenGoal = false;
+        this.timeRemaining = this.gameDuration;
         
-        // Initialize audio context
+        // Update UI colors to match actual player colors
+        this.updateScoreColors();
+        
+        // Initialize audio
         this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
         
         // Initialize Matter.js
         this.engine = Matter.Engine.create();
         this.world = this.engine.world;
-        this.world.gravity.y = 0; // No gravity (top-down view)
+        this.world.gravity.y = 0;
         
-        // Create walls and divider
+        // Collision events for sounds
+        Matter.Events.on(this.engine, 'collisionStart', (event) => {
+            for (const pair of event.pairs) {
+                const speed = Math.sqrt(
+                    Math.pow((pair.bodyA.velocity?.x || 0) - (pair.bodyB.velocity?.x || 0), 2) +
+                    Math.pow((pair.bodyA.velocity?.y || 0) - (pair.bodyB.velocity?.y || 0), 2)
+                );
+                if (speed > 1) {
+                    this.playSound(300 + speed * 30, 0.08);
+                }
+            }
+        });
+        
         this.createBoard();
+        this.createPucks(5);
         
-        // Create pucks
-        this.createPucks();
-        
-        // Start physics runner
+        // Start physics
         this.runner = Matter.Runner.create();
         Matter.Runner.run(this.runner, this.engine);
         
         // Start render loop
         this.render();
         
-        // Set up network data handler
+        // Start timer
+        this.startTimer();
+        
+        // Network handler
         network.onDataReceived = (data) => this.handleNetworkData(data);
+    }
+    
+    updateScoreColors() {
+        const youEl = document.querySelector('.player-you');
+        const oppEl = document.querySelector('.player-opponent');
+        if (youEl) youEl.style.color = this.myColor;
+        if (oppEl) oppEl.style.color = this.opponentColor;
+    }
+    
+    startTimer() {
+        // Create or update timer display
+        let timerEl = document.getElementById('game-timer');
+        if (!timerEl) {
+            timerEl = document.createElement('div');
+            timerEl.id = 'game-timer';
+            timerEl.className = 'game-timer';
+            document.getElementById('game-ui').appendChild(timerEl);
+        }
+        timerEl.textContent = this.formatTime(this.timeRemaining);
+        
+        this.timerInterval = setInterval(() => {
+            this.timeRemaining--;
+            timerEl.textContent = this.formatTime(this.timeRemaining);
+            
+            // Flash red when under 10 seconds
+            if (this.timeRemaining <= 10) {
+                timerEl.classList.toggle('timer-urgent');
+            }
+            
+            if (this.timeRemaining <= 0) {
+                clearInterval(this.timerInterval);
+                this.handleTimeUp();
+            }
+        }, 1000);
+    }
+    
+    formatTime(seconds) {
+        const m = Math.floor(seconds / 60);
+        const s = seconds % 60;
+        return `${m}:${s.toString().padStart(2, '0')}`;
+    }
+    
+    handleTimeUp() {
+        // Count pucks on each player's side
+        const centerY = this.boardHeight / 2;
+        let pucksOnMySide = 0;
+        let pucksOnOpponentSide = 0;
+        
+        for (const puck of this.allPucks) {
+            const onBottom = puck.position.y > centerY;
+            const onTop = puck.position.y < centerY;
+            
+            if (this.mySideIsBottom) {
+                if (onBottom) pucksOnMySide++;
+                else if (onTop) pucksOnOpponentSide++;
+            } else {
+                if (onTop) pucksOnMySide++;
+                else if (onBottom) pucksOnOpponentSide++;
+            }
+        }
+        
+        if (pucksOnMySide === pucksOnOpponentSide) {
+            // TIE — golden goal!
+            this.startGoldenGoal();
+        } else if (pucksOnMySide < pucksOnOpponentSide) {
+            // Fewer pucks on my side = I win (opponent has more)
+            this.endGame(true, `Time's up! You had ${pucksOnMySide} pucks, opponent had ${pucksOnOpponentSide}.`);
+        } else {
+            this.endGame(false, `Time's up! You had ${pucksOnMySide} pucks, opponent had ${pucksOnOpponentSide}.`);
+        }
+    }
+    
+    startGoldenGoal() {
+        this.goldenGoal = true;
+        
+        // Remove all existing pucks
+        for (const puck of this.allPucks) {
+            Matter.World.remove(this.world, puck);
+        }
+        this.allPucks = [];
+        
+        // Create 1 puck per player
+        this.createPucks(1);
+        
+        // Reset timer for golden goal (30 seconds)
+        this.timeRemaining = 30;
+        
+        let timerEl = document.getElementById('game-timer');
+        if (timerEl) timerEl.textContent = this.formatTime(this.timeRemaining);
+        
+        // Show golden goal banner
+        this.showBanner('⚡ GOLDEN GOAL ⚡', 'First to get their puck through wins!');
+        
+        // Notify opponent
+        network.send({ type: 'goldenGoal' });
+        
+        // Restart timer
+        this.timerInterval = setInterval(() => {
+            this.timeRemaining--;
+            if (timerEl) timerEl.textContent = this.formatTime(this.timeRemaining);
+            if (this.timeRemaining <= 10) {
+                timerEl?.classList.toggle('timer-urgent');
+            }
+            if (this.timeRemaining <= 0) {
+                clearInterval(this.timerInterval);
+                // Golden goal timeout = draw
+                this.endGame(false, "Golden goal expired — it's a draw!");
+            }
+        }, 1000);
+    }
+    
+    showBanner(title, subtitle) {
+        let banner = document.getElementById('game-banner');
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.id = 'game-banner';
+            banner.className = 'game-banner';
+            document.getElementById('game-screen').appendChild(banner);
+        }
+        banner.innerHTML = `<div class="banner-title">${title}</div><div class="banner-sub">${subtitle}</div>`;
+        banner.style.display = 'flex';
+        
+        setTimeout(() => {
+            banner.style.display = 'none';
+        }, 3000);
     }
     
     createBoard() {
@@ -115,35 +277,35 @@ class FastrackGame {
         const h = this.boardHeight;
         const t = this.wallThickness;
         
-        // Create walls (static bodies)
         const wallOptions = { 
             isStatic: true, 
             restitution: 0.8,
-            friction: 0.1
+            friction: 0.1,
+            label: 'wall'
         };
         
-        // Top and bottom walls
         const topWall = Bodies.rectangle(w / 2, t / 2, w, t, wallOptions);
         const bottomWall = Bodies.rectangle(w / 2, h - t / 2, w, t, wallOptions);
-        
-        // Left and right walls
         const leftWall = Bodies.rectangle(t / 2, h / 2, t, h, wallOptions);
         const rightWall = Bodies.rectangle(w - t / 2, h / 2, t, h, wallOptions);
         
         // Center divider with slot
         const dividerY = h / 2;
+        const leftDividerWidth = w / 2 - this.slotWidth / 2;
+        const rightDividerWidth = w / 2 - this.slotWidth / 2;
+        
         const leftDivider = Bodies.rectangle(
-            (w / 2 - this.slotWidth / 2) / 2,
+            leftDividerWidth / 2,
             dividerY,
-            w / 2 - this.slotWidth / 2,
+            leftDividerWidth,
             t,
             wallOptions
         );
         
         const rightDivider = Bodies.rectangle(
-            w / 2 + this.slotWidth / 2 + (w / 2 - this.slotWidth / 2) / 2,
+            w - rightDividerWidth / 2,
             dividerY,
-            w / 2 - this.slotWidth / 2,
+            rightDividerWidth,
             t,
             wallOptions
         );
@@ -154,48 +316,77 @@ class FastrackGame {
         ]);
     }
     
-    createPucks() {
+    createPucks(count) {
         const { Bodies } = Matter;
-        const myColor = this.isHost ? '#ff3333' : '#3366ff';
-        const opponentColor = this.isHost ? '#3366ff' : '#ff3333';
+        const centerY = this.boardHeight / 2;
         
-        // My pucks start on my side
-        const myStartY = this.isHost ? this.boardHeight - 100 : 100;
+        // Host's pucks start on bottom, joiner's on top
+        // Each puck starts as the color of the player whose side it's on
+        const spacing = this.boardWidth / (count + 1);
         
-        for (let i = 0; i < 5; i++) {
-            const x = 150 + i * 120;
-            const puck = Bodies.circle(x, myStartY, this.puckRadius, {
+        for (let i = 0; i < count; i++) {
+            const x = spacing * (i + 1);
+            
+            // Puck on bottom side (host's side) — starts as host's color
+            const bottomPuck = Bodies.circle(x, centerY + 100 + Math.random() * 50, this.puckRadius, {
                 restitution: 0.9,
                 friction: 0.01,
                 frictionAir: 0.02,
                 density: 0.05,
-                render: { fillStyle: myColor }
+                label: 'puck'
             });
+            bottomPuck.ownerColor = this.hostColor;
+            bottomPuck.puckIndex = i;
+            bottomPuck.side = 'bottom';
+            this.allPucks.push(bottomPuck);
+            Matter.World.add(this.world, bottomPuck);
             
-            puck.isMine = true;
-            puck.color = myColor;
-            this.myPucks.push(puck);
-            Matter.World.add(this.world, puck);
+            // Puck on top side (joiner's side) — starts as joiner's color
+            const topPuck = Bodies.circle(x, centerY - 100 - Math.random() * 50, this.puckRadius, {
+                restitution: 0.9,
+                friction: 0.01,
+                frictionAir: 0.02,
+                density: 0.05,
+                label: 'puck'
+            });
+            topPuck.ownerColor = this.joinerColor;
+            topPuck.puckIndex = i + count;
+            topPuck.side = 'top';
+            this.allPucks.push(topPuck);
+            Matter.World.add(this.world, topPuck);
         }
+    }
+    
+    // Determine if a puck is currently on my side and thus I can move it
+    canIMovePuck(puck) {
+        const centerY = this.boardHeight / 2;
+        const onBottom = puck.position.y > centerY;
+        const onTop = puck.position.y < centerY;
         
-        // Opponent pucks (we'll update their positions from network)
-        const opponentStartY = this.isHost ? 100 : this.boardHeight - 100;
+        if (this.mySideIsBottom && onBottom) return true;
+        if (!this.mySideIsBottom && onTop) return true;
+        return false;
+    }
+    
+    // Update puck colors based on which side they're on
+    updatePuckOwnership() {
+        const centerY = this.boardHeight / 2;
         
-        for (let i = 0; i < 5; i++) {
-            const x = 150 + i * 120;
-            const puck = Bodies.circle(x, opponentStartY, this.puckRadius, {
-                restitution: 0.9,
-                friction: 0.01,
-                frictionAir: 0.02,
-                density: 0.05,
-                render: { fillStyle: opponentColor },
-                isStatic: true // Opponent pucks are controlled remotely
-            });
+        for (const puck of this.allPucks) {
+            const onBottom = puck.position.y > centerY;
+            const prevColor = puck.ownerColor;
             
-            puck.isMine = false;
-            puck.color = opponentColor;
-            this.opponentPucks.push(puck);
-            Matter.World.add(this.world, puck);
+            if (onBottom) {
+                puck.ownerColor = this.hostColor;
+            } else {
+                puck.ownerColor = this.joinerColor;
+            }
+            
+            // Play a goal sound if the puck crossed sides
+            if (prevColor !== puck.ownerColor) {
+                this.playSound(600, 0.15);
+                network.send({ type: 'goal' });
+            }
         }
     }
     
@@ -208,13 +399,15 @@ class FastrackGame {
         const x = (e.clientX - rect.left) * scaleX;
         const y = (e.clientY - rect.top) * scaleY;
         
-        // Check if clicked on any of my pucks
-        for (const puck of this.myPucks) {
+        // Check if clicked on a puck that's on MY side
+        for (const puck of this.allPucks) {
+            if (!this.canIMovePuck(puck)) continue;
+            
             const dx = puck.position.x - x;
             const dy = puck.position.y - y;
             const dist = Math.sqrt(dx * dx + dy * dy);
             
-            if (dist < this.puckRadius) {
+            if (dist < this.puckRadius * 1.5) {
                 this.selectedPuck = puck;
                 this.dragStart = { x, y };
                 this.mousePos = { x, y };
@@ -229,244 +422,382 @@ class FastrackGame {
         const rect = this.canvas.getBoundingClientRect();
         const scaleX = this.boardWidth / rect.width;
         const scaleY = this.boardHeight / rect.height;
-        const x = (e.clientX - rect.left) * scaleX;
-        const y = (e.clientY - rect.top) * scaleY;
-        
-        this.mousePos = { x, y };
-        
-        // Update aim indicator
-        this.updateAimIndicator();
+        this.mousePos = {
+            x: (e.clientX - rect.left) * scaleX,
+            y: (e.clientY - rect.top) * scaleY
+        };
     }
     
     handlePointerUp(e) {
         if (!this.selectedPuck) return;
         
-        // Calculate launch velocity
         const dx = this.dragStart.x - this.mousePos.x;
         const dy = this.dragStart.y - this.mousePos.y;
         const power = Math.sqrt(dx * dx + dy * dy);
         const maxPower = 150;
         const scale = Math.min(power / maxPower, 1) * 0.5;
         
-        // Apply force
         Matter.Body.setVelocity(this.selectedPuck, {
             x: dx * scale,
             y: dy * scale
         });
         
-        // Play sound
         this.playSound(200 + power * 2, 0.1);
+        
+        // Send flick to opponent
+        network.send({
+            type: 'flick',
+            index: this.selectedPuck.puckIndex,
+            vx: dx * scale,
+            vy: dy * scale
+        });
         
         this.selectedPuck = null;
         this.dragStart = null;
         this.aimIndicator.style.display = 'none';
     }
     
-    updateAimIndicator() {
-        if (!this.selectedPuck || !this.dragStart) return;
-        
-        const dx = this.dragStart.x - this.mousePos.x;
-        const dy = this.dragStart.y - this.mousePos.y;
-        const length = Math.sqrt(dx * dx + dy * dy);
-        const angle = Math.atan2(dy, dx) * 180 / Math.PI + 90;
-        
-        const rect = this.canvas.getBoundingClientRect();
-        const scaleX = rect.width / this.boardWidth;
-        const scaleY = rect.height / this.boardHeight;
-        
-        this.aimIndicator.style.display = 'block';
-        this.aimIndicator.style.left = (this.selectedPuck.position.x * scaleX + rect.left) + 'px';
-        this.aimIndicator.style.top = (this.selectedPuck.position.y * scaleY + rect.top) + 'px';
-        this.aimIndicator.style.height = Math.min(length * scaleY, 200) + 'px';
-        this.aimIndicator.style.transform = `rotate(${angle}deg)`;
-    }
-    
     handleNetworkData(data) {
         if (data.type === 'pucks') {
-            // Update opponent puck positions
-            data.positions.forEach((pos, i) => {
-                if (i < this.opponentPucks.length) {
-                    Matter.Body.setPosition(this.opponentPucks[i], pos);
-                }
-            });
-        } else if (data.type === 'sound') {
-            this.playSound(data.freq, data.duration);
+            // Full sync — update all puck positions from opponent's perspective
+            // Opponent sends their view, we need to mirror Y coordinates
+            if (data.positions) {
+                data.positions.forEach((pos, i) => {
+                    if (i < this.allPucks.length) {
+                        // Mirror the position since opponent sees the board flipped
+                        Matter.Body.setPosition(this.allPucks[i], {
+                            x: pos.x,
+                            y: this.boardHeight - pos.y
+                        });
+                    }
+                });
+            }
+        } else if (data.type === 'flick') {
+            // Opponent flicked a puck
+            const puck = this.allPucks.find(p => p.puckIndex === data.index);
+            if (puck) {
+                // Mirror the velocity
+                Matter.Body.setVelocity(puck, {
+                    x: data.vx,
+                    y: -data.vy
+                });
+            }
+        } else if (data.type === 'goal') {
+            this.playSound(600, 0.15);
+        } else if (data.type === 'goldenGoal') {
+            // Opponent triggered golden goal — we should already be in sync
         }
     }
     
     syncPucks() {
         const now = Date.now();
         if (now - this.lastSyncTime < this.syncInterval) return;
-        
         this.lastSyncTime = now;
         
-        // Send my puck positions
-        const positions = this.myPucks.map(p => ({ x: p.position.x, y: p.position.y }));
+        const positions = this.allPucks.map(p => ({
+            x: p.position.x,
+            y: p.position.y
+        }));
         network.send({ type: 'pucks', positions });
     }
     
     checkWinCondition() {
+        this.updatePuckOwnership();
+        
         const centerY = this.boardHeight / 2;
+        let pucksOnMySide = 0;
+        let pucksOnOpponentSide = 0;
         
-        // Count pucks on my side
-        let myScore = 0;
-        for (const puck of this.myPucks) {
-            if (this.isHost && puck.position.y > centerY) myScore++;
-            if (!this.isHost && puck.position.y < centerY) myScore++;
+        for (const puck of this.allPucks) {
+            const onBottom = puck.position.y > centerY;
+            
+            if (this.mySideIsBottom) {
+                if (onBottom) pucksOnMySide++;
+                else pucksOnOpponentSide++;
+            } else {
+                if (!onBottom) pucksOnMySide++;
+                else pucksOnOpponentSide++;
+            }
         }
         
-        // Count opponent pucks on their side
-        let opponentScore = 0;
-        for (const puck of this.opponentPucks) {
-            if (this.isHost && puck.position.y < centerY) opponentScore++;
-            if (!this.isHost && puck.position.y > centerY) opponentScore++;
-        }
+        // Update score display
+        document.getElementById('your-score').textContent = pucksOnMySide;
+        document.getElementById('opponent-score').textContent = pucksOnOpponentSide;
         
-        // Update UI
-        document.getElementById('your-score').textContent = myScore;
-        document.getElementById('opponent-score').textContent = opponentScore;
-        
-        // Check win/lose
-        if (myScore === 0) {
-            this.endGame(true); // Win
-        } else if (opponentScore === 0) {
-            this.endGame(false); // Lose
+        // In golden goal, first to clear their side wins
+        if (this.goldenGoal && pucksOnMySide === 0) {
+            this.endGame(true, 'Golden goal — you cleared your side!');
         }
     }
     
-    endGame(won) {
-        this.gameStarted = false;
-        Matter.Runner.stop(this.runner);
+    // Keep pucks in bounds
+    constrainPucks() {
+        const t = this.wallThickness;
+        const r = this.puckRadius;
         
-        // Show result screen
+        for (const puck of this.allPucks) {
+            let x = puck.position.x;
+            let y = puck.position.y;
+            let clamped = false;
+            
+            if (x < t + r) { x = t + r; clamped = true; }
+            if (x > this.boardWidth - t - r) { x = this.boardWidth - t - r; clamped = true; }
+            if (y < t + r) { y = t + r; clamped = true; }
+            if (y > this.boardHeight - t - r) { y = this.boardHeight - t - r; clamped = true; }
+            
+            if (clamped) {
+                Matter.Body.setPosition(puck, { x, y });
+            }
+        }
+    }
+    
+    endGame(won, detail) {
+        this.gameStarted = false;
+        if (this.runner) Matter.Runner.stop(this.runner);
+        if (this.timerInterval) clearInterval(this.timerInterval);
+        
         showScreen('result-screen');
         const resultTitle = document.getElementById('result-title');
         resultTitle.textContent = won ? 'YOU WIN!' : 'YOU LOSE!';
         resultTitle.className = 'result-title ' + (won ? 'win' : 'lose');
         
-        // Play result sound
+        // Show detail text
+        let detailEl = document.getElementById('result-detail');
+        if (!detailEl) {
+            detailEl = document.createElement('p');
+            detailEl.id = 'result-detail';
+            detailEl.className = 'result-detail';
+            resultTitle.parentNode.insertBefore(detailEl, resultTitle.nextSibling);
+        }
+        detailEl.textContent = detail || '';
+        
         this.playSound(won ? 800 : 200, 0.5);
     }
     
     playSound(frequency, duration) {
         if (!this.audioContext) return;
-        
-        const oscillator = this.audioContext.createOscillator();
-        const gainNode = this.audioContext.createGain();
-        
-        oscillator.connect(gainNode);
-        gainNode.connect(this.audioContext.destination);
-        
-        oscillator.frequency.value = frequency;
-        oscillator.type = 'sine';
-        
-        gainNode.gain.setValueAtTime(0.1, this.audioContext.currentTime);
-        gainNode.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + duration);
-        
-        oscillator.start(this.audioContext.currentTime);
-        oscillator.stop(this.audioContext.currentTime + duration);
+        try {
+            const osc = this.audioContext.createOscillator();
+            const gain = this.audioContext.createGain();
+            osc.connect(gain);
+            gain.connect(this.audioContext.destination);
+            osc.frequency.value = frequency;
+            osc.type = 'sine';
+            gain.gain.setValueAtTime(0.1, this.audioContext.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + duration);
+            osc.start(this.audioContext.currentTime);
+            osc.stop(this.audioContext.currentTime + duration);
+        } catch (e) {}
     }
     
     render() {
         if (!this.gameStarted) return;
         
-        // Clear canvas
-        this.ctx.fillStyle = '#8B4513'; // Wood color
-        this.ctx.fillRect(0, 0, this.boardWidth, this.boardHeight);
+        const ctx = this.ctx;
+        const w = this.boardWidth;
+        const h = this.boardHeight;
         
-        // Draw checkered pattern in background
-        this.drawCheckers();
+        // Keep pucks in bounds
+        this.constrainPucks();
         
-        // Draw center divider
+        // Wood background
+        ctx.fillStyle = '#C4933F';
+        ctx.fillRect(0, 0, w, h);
+        
+        // Subtle wood grain
+        ctx.strokeStyle = 'rgba(160, 120, 40, 0.3)';
+        ctx.lineWidth = 1;
+        for (let i = 0; i < h; i += 8) {
+            ctx.beginPath();
+            ctx.moveTo(0, i + Math.sin(i * 0.1) * 3);
+            ctx.lineTo(w, i + Math.sin(i * 0.1 + 2) * 3);
+            ctx.stroke();
+        }
+        
+        // My side highlight (subtle tint)
+        const centerY = h / 2;
+        ctx.fillStyle = this.mySideIsBottom
+            ? 'rgba(255, 50, 50, 0.05)'
+            : 'rgba(50, 100, 255, 0.05)';
+        ctx.fillRect(0, this.mySideIsBottom ? centerY : 0, w, h / 2);
+        
+        // "YOUR SIDE" label
+        ctx.save();
+        ctx.font = '14px "Open Sans"';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = 'rgba(255,255,255,0.25)';
+        if (this.mySideIsBottom) {
+            ctx.fillText('YOUR SIDE', w / 2, h - 25);
+        } else {
+            ctx.fillText('YOUR SIDE', w / 2, 30);
+        }
+        ctx.restore();
+        
+        // Checkered borders (top and bottom racing stripes)
+        this.drawRacingStripe(0, 0, w, 10);
+        this.drawRacingStripe(0, h - 10, w, 10);
+        
+        // Walls
+        ctx.fillStyle = '#cc0000';
+        const t = this.wallThickness;
+        ctx.fillRect(0, 0, w, t);
+        ctx.fillRect(0, h - t, w, t);
+        ctx.fillRect(0, 0, t, h);
+        ctx.fillRect(w - t, 0, t, h);
+        
+        // Center divider
         this.drawDivider();
         
-        // Draw walls
-        this.drawWalls();
+        // Draw aim indicator
+        if (this.selectedPuck && this.dragStart) {
+            this.drawAimLine();
+        }
         
         // Draw pucks
         this.drawPucks();
         
-        // Sync pucks over network
+        // Sync
         this.syncPucks();
         
-        // Check win condition
+        // Win check
         this.checkWinCondition();
         
         requestAnimationFrame(() => this.render());
     }
     
-    drawCheckers() {
-        const size = 40;
-        this.ctx.fillStyle = 'rgba(139, 69, 19, 0.3)';
-        for (let y = 0; y < this.boardHeight; y += size) {
-            for (let x = 0; x < this.boardWidth; x += size) {
-                if ((x / size + y / size) % 2 === 0) {
-                    this.ctx.fillRect(x, y, size, size);
-                }
+    drawRacingStripe(x, y, width, height) {
+        const ctx = this.ctx;
+        const size = height;
+        ctx.fillStyle = '#222';
+        ctx.fillRect(x, y, width, height);
+        ctx.fillStyle = '#fff';
+        for (let i = 0; i < width / size; i++) {
+            if (i % 2 === 0) {
+                ctx.fillRect(x + i * size, y, size, size);
             }
         }
     }
     
     drawDivider() {
+        const ctx = this.ctx;
         const centerY = this.boardHeight / 2;
         const t = this.wallThickness;
+        const slotLeft = this.boardWidth / 2 - this.slotWidth / 2;
+        const slotRight = this.boardWidth / 2 + this.slotWidth / 2;
         
-        // Draw divider segments
-        this.ctx.fillStyle = '#222';
-        this.ctx.fillRect(0, centerY - t / 2, this.boardWidth / 2 - this.slotWidth / 2, t);
-        this.ctx.fillRect(this.boardWidth / 2 + this.slotWidth / 2, centerY - t / 2, 
-                         this.boardWidth / 2 - this.slotWidth / 2, t);
+        // Divider segments
+        ctx.fillStyle = '#333';
+        ctx.fillRect(0, centerY - t / 2, slotLeft, t);
+        ctx.fillRect(slotRight, centerY - t / 2, this.boardWidth - slotRight, t);
         
-        // Highlight slot
-        this.ctx.strokeStyle = '#ff3333';
-        this.ctx.lineWidth = 2;
-        this.ctx.setLineDash([5, 5]);
-        this.ctx.strokeRect(this.boardWidth / 2 - this.slotWidth / 2, centerY - t / 2, 
-                           this.slotWidth, t);
-        this.ctx.setLineDash([]);
+        // Slot glow effect
+        ctx.shadowColor = '#ff6600';
+        ctx.shadowBlur = 15;
+        ctx.strokeStyle = '#ff6600';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(slotLeft, centerY - t / 2);
+        ctx.lineTo(slotLeft, centerY + t / 2);
+        ctx.moveTo(slotRight, centerY - t / 2);
+        ctx.lineTo(slotRight, centerY + t / 2);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        
+        // Slot opening highlight
+        ctx.fillStyle = 'rgba(255, 100, 0, 0.15)';
+        ctx.fillRect(slotLeft, centerY - t, this.slotWidth, t * 2);
     }
     
-    drawWalls() {
-        const t = this.wallThickness;
-        this.ctx.fillStyle = '#cc0000';
-        this.ctx.fillRect(0, 0, this.boardWidth, t); // Top
-        this.ctx.fillRect(0, this.boardHeight - t, this.boardWidth, t); // Bottom
-        this.ctx.fillRect(0, 0, t, this.boardHeight); // Left
-        this.ctx.fillRect(this.boardWidth - t, 0, t, this.boardHeight); // Right
+    drawAimLine() {
+        const ctx = this.ctx;
+        const puck = this.selectedPuck;
+        const dx = this.dragStart.x - this.mousePos.x;
+        const dy = this.dragStart.y - this.mousePos.y;
+        const power = Math.min(Math.sqrt(dx * dx + dy * dy), 150);
+        
+        // Draw line from puck in launch direction
+        const angle = Math.atan2(dy, dx);
+        const lineLen = power * 1.5;
+        
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([8, 6]);
+        ctx.beginPath();
+        ctx.moveTo(puck.position.x, puck.position.y);
+        ctx.lineTo(
+            puck.position.x + Math.cos(angle) * lineLen,
+            puck.position.y + Math.sin(angle) * lineLen
+        );
+        ctx.stroke();
+        ctx.setLineDash([]);
+        
+        // Power indicator circle
+        const maxR = this.puckRadius * 2;
+        const powerR = this.puckRadius + (power / 150) * maxR;
+        ctx.strokeStyle = `rgba(255, ${255 - power * 1.5}, 0, 0.5)`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(puck.position.x, puck.position.y, powerR, 0, Math.PI * 2);
+        ctx.stroke();
     }
     
     drawPucks() {
-        const allPucks = [...this.myPucks, ...this.opponentPucks];
+        const ctx = this.ctx;
         
-        for (const puck of allPucks) {
+        for (const puck of this.allPucks) {
             const x = puck.position.x;
             const y = puck.position.y;
             const r = this.puckRadius;
+            const color = puck.ownerColor;
+            const isSelected = puck === this.selectedPuck;
+            const canMove = this.canIMovePuck(puck);
             
             // Shadow
-            this.ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
-            this.ctx.beginPath();
-            this.ctx.arc(x + 3, y + 3, r, 0, Math.PI * 2);
-            this.ctx.fill();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+            ctx.beginPath();
+            ctx.arc(x + 3, y + 3, r, 0, Math.PI * 2);
+            ctx.fill();
             
-            // Puck body
-            const gradient = this.ctx.createRadialGradient(x - r / 3, y - r / 3, 0, x, y, r);
-            gradient.addColorStop(0, this.lightenColor(puck.color, 40));
-            gradient.addColorStop(1, puck.color);
-            this.ctx.fillStyle = gradient;
-            this.ctx.beginPath();
-            this.ctx.arc(x, y, r, 0, Math.PI * 2);
-            this.ctx.fill();
+            // Selection ring
+            if (isSelected) {
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(x, y, r + 5, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+            
+            // Puck body with gradient
+            const grad = ctx.createRadialGradient(x - r / 3, y - r / 3, 0, x, y, r);
+            grad.addColorStop(0, this.lightenColor(color, 50));
+            grad.addColorStop(1, color);
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Border
+            ctx.strokeStyle = this.lightenColor(color, -30);
+            ctx.lineWidth = 2;
+            ctx.stroke();
             
             // Star emblem
-            this.ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-            this.drawStar(x, y, r * 0.5, 5);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            this.drawStar(x, y, r * 0.45, 5);
             
             // Highlight
-            this.ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-            this.ctx.beginPath();
-            this.ctx.arc(x - r / 3, y - r / 3, r / 4, 0, Math.PI * 2);
-            this.ctx.fill();
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+            ctx.beginPath();
+            ctx.arc(x - r / 3, y - r / 3, r / 4, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Dim pucks I can't move
+            if (!canMove) {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+                ctx.beginPath();
+                ctx.arc(x, y, r, 0, Math.PI * 2);
+                ctx.fill();
+            }
         }
     }
     
@@ -474,20 +805,14 @@ class FastrackGame {
         this.ctx.save();
         this.ctx.translate(cx, cy);
         this.ctx.beginPath();
-        
         for (let i = 0; i < points * 2; i++) {
             const r = i % 2 === 0 ? radius : radius / 2;
-            const angle = (Math.PI / points) * i;
+            const angle = (Math.PI / points) * i - Math.PI / 2;
             const x = Math.cos(angle) * r;
             const y = Math.sin(angle) * r;
-            
-            if (i === 0) {
-                this.ctx.moveTo(x, y);
-            } else {
-                this.ctx.lineTo(x, y);
-            }
+            if (i === 0) this.ctx.moveTo(x, y);
+            else this.ctx.lineTo(x, y);
         }
-        
         this.ctx.closePath();
         this.ctx.fill();
         this.ctx.restore();
@@ -496,30 +821,29 @@ class FastrackGame {
     lightenColor(color, percent) {
         const num = parseInt(color.replace('#', ''), 16);
         const amt = Math.round(2.55 * percent);
-        const R = (num >> 16) + amt;
-        const G = (num >> 8 & 0x00FF) + amt;
-        const B = (num & 0x0000FF) + amt;
-        return '#' + (0x1000000 + (R < 255 ? R < 1 ? 0 : R : 255) * 0x10000 +
-                     (G < 255 ? G < 1 ? 0 : G : 255) * 0x100 +
-                     (B < 255 ? B < 1 ? 0 : B : 255))
-                     .toString(16).slice(1);
+        const R = Math.min(255, Math.max(0, (num >> 16) + amt));
+        const G = Math.min(255, Math.max(0, (num >> 8 & 0xFF) + amt));
+        const B = Math.min(255, Math.max(0, (num & 0xFF) + amt));
+        return '#' + ((1 << 24) + (R << 16) + (G << 8) + B).toString(16).slice(1);
     }
     
     cleanup() {
-        if (this.runner) {
-            Matter.Runner.stop(this.runner);
-        }
-        if (this.world) {
-            Matter.World.clear(this.world);
-        }
-        if (this.engine) {
-            Matter.Engine.clear(this.engine);
-        }
-        this.myPucks = [];
-        this.opponentPucks = [];
+        if (this.timerInterval) clearInterval(this.timerInterval);
+        if (this.runner) Matter.Runner.stop(this.runner);
+        if (this.world) Matter.World.clear(this.world);
+        if (this.engine) Matter.Engine.clear(this.engine);
+        this.allPucks = [];
         this.gameStarted = false;
+        this.goldenGoal = false;
+        
+        // Clean up dynamic UI elements
+        const timer = document.getElementById('game-timer');
+        if (timer) timer.remove();
+        const banner = document.getElementById('game-banner');
+        if (banner) banner.remove();
+        const detail = document.getElementById('result-detail');
+        if (detail) detail.remove();
     }
 }
 
-// Create global game instance
 const game = new FastrackGame();

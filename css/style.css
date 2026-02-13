@@ -332,6 +332,79 @@ input[type="text"]::placeholder {
     }
 }
 
+/* Game Timer */
+.game-timer {
+    position: absolute;
+    top: 1rem;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: 'Russo One', sans-serif;
+    font-size: 2.5rem;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.8);
+    border: 2px solid #ff6600;
+    border-radius: 8px;
+    padding: 0.3rem 1.5rem;
+    z-index: 20;
+    text-shadow: 0 0 10px rgba(255, 100, 0, 0.5);
+    pointer-events: none;
+}
+
+.game-timer.timer-urgent {
+    color: #ff3333;
+    border-color: #ff3333;
+    text-shadow: 0 0 20px rgba(255, 0, 0, 0.8);
+}
+
+/* Game Banner (Golden Goal, etc.) */
+.game-banner {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(0, 0, 0, 0.9);
+    border: 3px solid #ff6600;
+    border-radius: 16px;
+    padding: 2rem 4rem;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    animation: bannerIn 0.5s ease;
+    pointer-events: none;
+}
+
+.banner-title {
+    font-family: 'Russo One', sans-serif;
+    font-size: 3rem;
+    color: #ff6600;
+    text-shadow: 0 0 20px rgba(255, 100, 0, 0.8);
+}
+
+.banner-sub {
+    font-size: 1.2rem;
+    color: rgba(255, 255, 255, 0.8);
+    margin-top: 0.5rem;
+}
+
+@keyframes bannerIn {
+    from {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.5);
+    }
+    to {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(1);
+    }
+}
+
+/* Result Detail */
+.result-detail {
+    font-size: 1.3rem;
+    color: rgba(255, 255, 255, 0.7);
+    margin-bottom: 2rem;
+}
+
 /* Responsive Design */
 @media (max-width: 768px) {
     .title {
