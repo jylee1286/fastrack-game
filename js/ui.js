@@ -1,5 +1,6 @@
 // UI Manager - Screen transitions and user interactions
 let currentScreen = 'home-screen';
+let helpShownThisSession = false;
 
 function showScreen(screenId) {
     // Hide all screens
@@ -11,11 +12,44 @@ function showScreen(screenId) {
     setTimeout(() => {
         document.getElementById(screenId).classList.add('active');
         currentScreen = screenId;
+        
+        // Show help overlay on first game (if not shown this session)
+        if (screenId === 'game-screen' && !helpShownThisSession) {
+            setTimeout(() => {
+                showHelp();
+                helpShownThisSession = true;
+            }, 500);
+        }
     }, 10);
+}
+
+function showHelp() {
+    document.getElementById('help-overlay').classList.add('active');
+}
+
+function hideHelp() {
+    document.getElementById('help-overlay').classList.remove('active');
+}
+
+function updateConnectionStatus(status) {
+    const dot = document.querySelector('.status-dot');
+    if (!dot) return;
+    
+    dot.className = 'status-dot';
+    if (status === 'connected') {
+        dot.classList.add('status-connected');
+    } else if (status === 'connecting') {
+        dot.classList.add('status-connecting');
+    } else {
+        dot.classList.add('status-disconnected');
+    }
 }
 
 // Home Screen Handlers
 document.getElementById('create-btn').addEventListener('click', async () => {
+    // Update connection status
+    updateConnectionStatus('connecting');
+    
     // Create game and show lobby
     const roomCode = await network.createGame(
         onGameConnected,
@@ -43,6 +77,7 @@ document.getElementById('join-submit-btn').addEventListener('click', async () =>
     }
     
     document.getElementById('join-error').textContent = 'Connecting...';
+    updateConnectionStatus('connecting');
     
     await network.joinGame(
         roomCode,
@@ -121,6 +156,9 @@ document.getElementById('result-home-btn').addEventListener('click', () => {
 function onGameConnected() {
     console.log('Game connected! Starting game...');
     
+    // Update connection status
+    updateConnectionStatus('connected');
+    
     // Start the game
     showScreen('game-screen');
     game.startGame(network.isHost);
@@ -134,6 +172,9 @@ function onGameDataReceived(data) {
 function onGameDisconnected(reason) {
     console.log('Game disconnected:', reason);
     
+    // Update connection status
+    updateConnectionStatus('disconnected');
+    
     // Clean up
     game.cleanup();
     
@@ -145,6 +186,22 @@ function onGameDisconnected(reason) {
         showScreen('home-screen');
     }
 }
+
+// Help button handlers
+document.getElementById('help-btn').addEventListener('click', () => {
+    showHelp();
+});
+
+document.getElementById('help-close-btn').addEventListener('click', () => {
+    hideHelp();
+});
+
+// Close help overlay when clicking outside
+document.getElementById('help-overlay').addEventListener('click', (e) => {
+    if (e.target.id === 'help-overlay') {
+        hideHelp();
+    }
+});
 
 // Handle page visibility changes (pause sync when hidden)
 document.addEventListener('visibilitychange', () => {

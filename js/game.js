@@ -10,6 +10,7 @@ class FastrackGame {
         this.gameStarted = false;
         this.allPucks = []; // All pucks in one array
         this.goldenGoal = false;
+        this.countdown = 0; // For 3-2-1-GO countdown
         
         // Timer
         this.gameDuration = 60; // 1 minute
@@ -43,6 +44,14 @@ class FastrackGame {
         
         // Sound
         this.audioContext = null;
+        
+        // Visual effects
+        this.particles = [];
+        this.screenShake = { x: 0, y: 0, intensity: 0 };
+        this.slotGlowPhase = 0;
+        this.puckPositionHistory = new Map(); // For smooth interpolation
+        this.puckTrails = []; // For motion trails
+        this.impactEffects = []; // Flash/ring effects
         
         this.setupCanvas();
         this.setupInput();
@@ -104,6 +113,7 @@ class FastrackGame {
         this.gameStarted = true;
         this.goldenGoal = false;
         this.timeRemaining = this.gameDuration;
+        this.countdown = 3;
         
         // Update UI colors to match actual player colors
         this.updateScoreColors();
@@ -116,7 +126,7 @@ class FastrackGame {
         this.world = this.engine.world;
         this.world.gravity.y = 0;
         
-        // Collision events for sounds
+        // Collision events for sounds and effects
         Matter.Events.on(this.engine, 'collisionStart', (event) => {
             for (const pair of event.pairs) {
                 const speed = Math.sqrt(
@@ -124,7 +134,22 @@ class FastrackGame {
                     Math.pow((pair.bodyA.velocity?.y || 0) - (pair.bodyB.velocity?.y || 0), 2)
                 );
                 if (speed > 1) {
-                    this.playSound(300 + speed * 30, 0.08);
+                    // Determine collision type
+                    const isPuckPuck = pair.bodyA.label === 'puck' && pair.bodyB.label === 'puck';
+                    const isWallHit = pair.bodyA.label === 'wall' || pair.bodyB.label === 'wall';
+                    
+                    if (isPuckPuck) {
+                        this.playCollisionSound(500 + speed * 40, 0.06, 'sine');
+                        const pos = pair.bodyA.label === 'puck' ? pair.bodyA.position : pair.bodyB.position;
+                        this.addImpactEffect(pos.x, pos.y, speed);
+                    } else if (isWallHit) {
+                        this.playCollisionSound(180 + speed * 20, 0.1, 'triangle');
+                        const pos = pair.bodyA.label === 'puck' ? pair.bodyA.position : pair.bodyB.position;
+                        this.addImpactEffect(pos.x, pos.y, speed);
+                        if (speed > 8) {
+                            this.addScreenShake(speed * 0.3);
+                        }
+                    }
                 }
             }
         });
@@ -141,11 +166,24 @@ class FastrackGame {
         // Start render loop
         this.render();
         
-        // Start timer
-        this.startTimer();
+        // 3-2-1-GO! Countdown
+        this.startCountdown();
         
         // Network handler
         network.onDataReceived = (data) => this.handleNetworkData(data);
+    }
+    
+    startCountdown() {
+        const countdownInterval = setInterval(() => {
+            if (this.countdown > 0) {
+                this.playSound(600, 0.1);
+                this.countdown--;
+            } else {
+                clearInterval(countdownInterval);
+                this.playSound(800, 0.15); // GO!
+                this.startTimer();
+            }
+        }, 1000);
     }
     
     updateScoreColors() {
@@ -170,9 +208,10 @@ class FastrackGame {
             this.timeRemaining--;
             timerEl.textContent = this.formatTime(this.timeRemaining);
             
-            // Flash red when under 10 seconds
+            // Tick-tock sound and flash when under 10 seconds
             if (this.timeRemaining <= 10) {
                 timerEl.classList.toggle('timer-urgent');
+                this.playTickSound();
             }
             
             if (this.timeRemaining <= 0) {
@@ -382,9 +421,10 @@ class FastrackGame {
                 puck.ownerColor = this.joinerColor;
             }
             
-            // Play a goal sound if the puck crossed sides
+            // Play goal sound and particles if the puck crossed sides
             if (prevColor !== puck.ownerColor) {
-                this.playSound(600, 0.15);
+                this.playGoalSound();
+                this.addParticles(puck.position.x, centerY, puck.ownerColor, 20);
                 network.send({ type: 'goal' });
             }
         }
@@ -471,6 +511,11 @@ class FastrackGame {
         }
         
         this.playSound(200 + power * 2, 0.1);
+        
+        // Haptic feedback on mobile
+        if (navigator.vibrate && power > 30) {
+            navigator.vibrate(Math.min(power, 50));
+        }
         
         this.selectedPuck = null;
         this.dragStart = null;
@@ -590,7 +635,12 @@ class FastrackGame {
         }
         detailEl.textContent = detail || '';
         
-        this.playSound(won ? 800 : 200, 0.5);
+        // Play victory or defeat sound
+        if (won) {
+            this.playVictorySound();
+        } else {
+            this.playDefeatSound();
+        }
     }
     
     playSound(frequency, duration) {
@@ -609,6 +659,240 @@ class FastrackGame {
         } catch (e) {}
     }
     
+    playCollisionSound(frequency, duration, type = 'sine') {
+        if (!this.audioContext) return;
+        try {
+            const osc = this.audioContext.createOscillator();
+            const gain = this.audioContext.createGain();
+            osc.connect(gain);
+            gain.connect(this.audioContext.destination);
+            osc.frequency.value = frequency;
+            osc.type = type;
+            gain.gain.setValueAtTime(0.08, this.audioContext.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, this.audioContext.currentTime + duration);
+            osc.start(this.audioContext.currentTime);
+            osc.stop(this.audioContext.currentTime + duration);
+        } catch (e) {}
+    }
+    
+    playGoalSound() {
+        if (!this.audioContext) return;
+        try {
+            // Whoosh + chime
+            const osc1 = this.audioContext.createOscillator();
+            const gain1 = this.audioContext.createGain();
+            osc1.connect(gain1);
+            gain1.connect(this.audioContext.destination);
+            osc1.type = 'sawtooth';
+            osc1.frequency.setValueAtTime(400, this.audioContext.currentTime);
+            osc1.frequency.exponentialRampToValueAtTime(800, this.audioContext.currentTime + 0.2);
+            gain1.gain.setValueAtTime(0.15, this.audioContext.currentTime);
+            gain1.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + 0.3);
+            osc1.start(this.audioContext.currentTime);
+            osc1.stop(this.audioContext.currentTime + 0.3);
+            
+            // Chime
+            setTimeout(() => {
+                const osc2 = this.audioContext.createOscillator();
+                const gain2 = this.audioContext.createGain();
+                osc2.connect(gain2);
+                gain2.connect(this.audioContext.destination);
+                osc2.frequency.value = 1200;
+                osc2.type = 'sine';
+                gain2.gain.setValueAtTime(0.1, this.audioContext.currentTime);
+                gain2.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + 0.4);
+                osc2.start(this.audioContext.currentTime);
+                osc2.stop(this.audioContext.currentTime + 0.4);
+            }, 100);
+        } catch (e) {}
+    }
+    
+    playVictorySound() {
+        if (!this.audioContext) return;
+        try {
+            const notes = [523, 659, 784, 1047]; // C E G C (triumphant)
+            notes.forEach((freq, i) => {
+                setTimeout(() => {
+                    const osc = this.audioContext.createOscillator();
+                    const gain = this.audioContext.createGain();
+                    osc.connect(gain);
+                    gain.connect(this.audioContext.destination);
+                    osc.frequency.value = freq;
+                    osc.type = 'sine';
+                    gain.gain.setValueAtTime(0.15, this.audioContext.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + 0.4);
+                    osc.start(this.audioContext.currentTime);
+                    osc.stop(this.audioContext.currentTime + 0.4);
+                }, i * 150);
+            });
+        } catch (e) {}
+    }
+    
+    playDefeatSound() {
+        if (!this.audioContext) return;
+        try {
+            const notes = [523, 392, 330, 262]; // C G E C (descending)
+            notes.forEach((freq, i) => {
+                setTimeout(() => {
+                    const osc = this.audioContext.createOscillator();
+                    const gain = this.audioContext.createGain();
+                    osc.connect(gain);
+                    gain.connect(this.audioContext.destination);
+                    osc.frequency.value = freq;
+                    osc.type = 'triangle';
+                    gain.gain.setValueAtTime(0.12, this.audioContext.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + 0.5);
+                    osc.start(this.audioContext.currentTime);
+                    osc.stop(this.audioContext.currentTime + 0.5);
+                }, i * 200);
+            });
+        } catch (e) {}
+    }
+    
+    playTickSound() {
+        if (!this.audioContext) return;
+        try {
+            const osc = this.audioContext.createOscillator();
+            const gain = this.audioContext.createGain();
+            osc.connect(gain);
+            gain.connect(this.audioContext.destination);
+            osc.frequency.value = 800;
+            osc.type = 'square';
+            gain.gain.setValueAtTime(0.05, this.audioContext.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, this.audioContext.currentTime + 0.05);
+            osc.start(this.audioContext.currentTime);
+            osc.stop(this.audioContext.currentTime + 0.05);
+        } catch (e) {}
+    }
+    
+    addParticles(x, y, color, count = 15) {
+        for (let i = 0; i < count; i++) {
+            const angle = (Math.PI * 2 * i) / count;
+            const speed = 2 + Math.random() * 3;
+            this.particles.push({
+                x, y, color,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                life: 1.0,
+                size: 3 + Math.random() * 3
+            });
+        }
+    }
+    
+    updateParticles() {
+        for (let i = this.particles.length - 1; i >= 0; i--) {
+            const p = this.particles[i];
+            p.x += p.vx;
+            p.y += p.vy;
+            p.life -= 0.02;
+            if (p.life <= 0) {
+                this.particles.splice(i, 1);
+            }
+        }
+    }
+    
+    drawParticles() {
+        const ctx = this.ctx;
+        for (const p of this.particles) {
+            ctx.globalAlpha = p.life;
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1.0;
+    }
+    
+    addImpactEffect(x, y, intensity) {
+        this.impactEffects.push({
+            x, y,
+            radius: 5,
+            maxRadius: 15 + intensity * 2,
+            life: 1.0
+        });
+    }
+    
+    updateImpactEffects() {
+        for (let i = this.impactEffects.length - 1; i >= 0; i--) {
+            const e = this.impactEffects[i];
+            e.radius += (e.maxRadius - e.radius) * 0.2;
+            e.life -= 0.05;
+            if (e.life <= 0) {
+                this.impactEffects.splice(i, 1);
+            }
+        }
+    }
+    
+    drawImpactEffects() {
+        const ctx = this.ctx;
+        for (const e of this.impactEffects) {
+            ctx.globalAlpha = e.life * 0.5;
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(e.x, e.y, e.radius, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.globalAlpha = e.life * 0.2;
+            ctx.strokeStyle = '#ffcc00';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(e.x, e.y, e.radius * 1.3, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+        ctx.globalAlpha = 1.0;
+    }
+    
+    addScreenShake(intensity) {
+        this.screenShake.intensity = Math.min(intensity, 10);
+    }
+    
+    updateScreenShake() {
+        if (this.screenShake.intensity > 0) {
+            this.screenShake.x = (Math.random() - 0.5) * this.screenShake.intensity;
+            this.screenShake.y = (Math.random() - 0.5) * this.screenShake.intensity;
+            this.screenShake.intensity *= 0.9;
+            if (this.screenShake.intensity < 0.1) {
+                this.screenShake.intensity = 0;
+                this.screenShake.x = 0;
+                this.screenShake.y = 0;
+            }
+        }
+    }
+    
+    addPuckTrail(x, y, color) {
+        this.puckTrails.push({
+            x, y, color,
+            life: 1.0,
+            radius: this.puckRadius * 0.8
+        });
+        // Limit trail count
+        if (this.puckTrails.length > 50) {
+            this.puckTrails.shift();
+        }
+    }
+    
+    updatePuckTrails() {
+        for (let i = this.puckTrails.length - 1; i >= 0; i--) {
+            const t = this.puckTrails[i];
+            t.life -= 0.05;
+            if (t.life <= 0) {
+                this.puckTrails.splice(i, 1);
+            }
+        }
+    }
+    
+    drawPuckTrails() {
+        const ctx = this.ctx;
+        for (const t of this.puckTrails) {
+            ctx.globalAlpha = t.life * 0.3;
+            ctx.fillStyle = t.color;
+            ctx.beginPath();
+            ctx.arc(t.x, t.y, t.radius * t.life, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1.0;
+    }
+    
     render() {
         if (!this.gameStarted) return;
         
@@ -616,60 +900,135 @@ class FastrackGame {
         const w = this.boardWidth;
         const h = this.boardHeight;
         
+        // Update visual effects
+        this.updateParticles();
+        this.updateImpactEffects();
+        this.updateScreenShake();
+        this.updatePuckTrails();
+        this.slotGlowPhase += 0.03;
+        
         // Keep pucks in bounds (host only — joiner gets state from host)
         if (this.isHost) this.constrainPucks();
         
-        // Flip canvas for joiner so their side is at bottom
+        // Apply screen shake
         ctx.save();
+        ctx.translate(this.screenShake.x, this.screenShake.y);
+        
+        // Flip canvas for joiner so their side is at bottom
         if (!this.isHost) {
             ctx.translate(0, h);
             ctx.scale(1, -1);
         }
         
-        // Wood background
-        ctx.fillStyle = '#C4933F';
+        // Premium wood background with gradient
+        const woodGrad = ctx.createLinearGradient(0, 0, 0, h);
+        woodGrad.addColorStop(0, '#C4933F');
+        woodGrad.addColorStop(0.5, '#D4A558');
+        woodGrad.addColorStop(1, '#B8812A');
+        ctx.fillStyle = woodGrad;
         ctx.fillRect(0, 0, w, h);
         
-        // Subtle wood grain
-        ctx.strokeStyle = 'rgba(160, 120, 40, 0.3)';
-        ctx.lineWidth = 1;
-        for (let i = 0; i < h; i += 8) {
+        // Enhanced wood grain texture
+        ctx.strokeStyle = 'rgba(160, 120, 40, 0.2)';
+        ctx.lineWidth = 2;
+        for (let i = 0; i < h; i += 6) {
+            const offset = Math.sin(i * 0.05) * 5;
+            ctx.globalAlpha = 0.15 + Math.sin(i * 0.1) * 0.05;
             ctx.beginPath();
-            ctx.moveTo(0, i + Math.sin(i * 0.1) * 3);
-            ctx.lineTo(w, i + Math.sin(i * 0.1 + 2) * 3);
+            ctx.moveTo(0, i);
+            ctx.bezierCurveTo(w/3, i + offset, 2*w/3, i - offset, w, i);
             ctx.stroke();
+        }
+        ctx.globalAlpha = 1.0;
+        
+        // Wood knots
+        for (let i = 0; i < 8; i++) {
+            const x = (i % 4) * (w / 4) + w / 8;
+            const y = Math.floor(i / 4) * (h / 2) + h / 4;
+            ctx.fillStyle = 'rgba(100, 70, 30, 0.1)';
+            ctx.beginPath();
+            ctx.ellipse(x, y, 20 + Math.random() * 10, 10 + Math.random() * 5, Math.random() * Math.PI, 0, Math.PI * 2);
+            ctx.fill();
         }
         
         // My side highlight (bottom half is always "my side" visually)
         const centerY = h / 2;
-        ctx.fillStyle = 'rgba(255, 50, 50, 0.05)';
+        ctx.fillStyle = 'rgba(255, 50, 50, 0.03)';
         ctx.fillRect(0, centerY, w, h / 2);
         
         // Checkered borders (top and bottom racing stripes)
         this.drawRacingStripe(0, 0, w, 10);
         this.drawRacingStripe(0, h - 10, w, 10);
         
-        // Walls
-        ctx.fillStyle = '#cc0000';
+        // Walls with metallic shine
+        const wallGrad = ctx.createLinearGradient(0, 0, w, 0);
+        wallGrad.addColorStop(0, '#aa0000');
+        wallGrad.addColorStop(0.5, '#ff3333');
+        wallGrad.addColorStop(1, '#aa0000');
+        ctx.fillStyle = wallGrad;
         const t = this.wallThickness;
         ctx.fillRect(0, 0, w, t);
         ctx.fillRect(0, h - t, w, t);
+        
+        const wallGrad2 = ctx.createLinearGradient(0, 0, 0, h);
+        wallGrad2.addColorStop(0, '#aa0000');
+        wallGrad2.addColorStop(0.5, '#ff3333');
+        wallGrad2.addColorStop(1, '#aa0000');
+        ctx.fillStyle = wallGrad2;
         ctx.fillRect(0, 0, t, h);
         ctx.fillRect(w - t, 0, t, h);
         
-        // Center divider
+        // Center divider with pulsing glow
         this.drawDivider();
+        
+        // Draw puck trails
+        this.drawPuckTrails();
         
         // Draw aim indicator
         if (this.selectedPuck && this.dragStart) {
             this.drawAimLine();
         }
         
-        // Draw pucks
+        // Draw pucks with 3D effect
         this.drawPucks();
+        
+        // Draw particles
+        this.drawParticles();
+        
+        // Draw impact effects
+        this.drawImpactEffects();
         
         // Restore canvas transform
         ctx.restore();
+        
+        // Draw countdown (NOT flipped — always readable)
+        if (this.countdown > 0) {
+            ctx.save();
+            ctx.font = 'bold 120px "Russo One"';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#ff3333';
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 8;
+            const countdownText = this.countdown.toString();
+            ctx.strokeText(countdownText, w / 2, h / 2);
+            ctx.fillText(countdownText, w / 2, h / 2);
+            ctx.restore();
+        } else if (this.countdown === 0 && this.timeRemaining === this.gameDuration) {
+            // Show "GO!" briefly
+            ctx.save();
+            ctx.font = 'bold 100px "Russo One"';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#00ff00';
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 8;
+            ctx.strokeText('GO!', w / 2, h / 2);
+            ctx.fillText('GO!', w / 2, h / 2);
+            ctx.restore();
+            // Hide after a moment
+            setTimeout(() => { this.countdown = -1; }, 500);
+        }
         
         // Draw side labels (NOT flipped — always readable)
         ctx.save();
@@ -710,27 +1069,55 @@ class FastrackGame {
         const slotLeft = this.boardWidth / 2 - this.slotWidth / 2;
         const slotRight = this.boardWidth / 2 + this.slotWidth / 2;
         
-        // Divider segments
-        ctx.fillStyle = '#333';
+        // Divider segments with gradient
+        const divGrad = ctx.createLinearGradient(0, centerY, this.boardWidth, centerY);
+        divGrad.addColorStop(0, '#222');
+        divGrad.addColorStop(0.4, '#444');
+        divGrad.addColorStop(0.6, '#444');
+        divGrad.addColorStop(1, '#222');
+        ctx.fillStyle = divGrad;
         ctx.fillRect(0, centerY - t / 2, slotLeft, t);
         ctx.fillRect(slotRight, centerY - t / 2, this.boardWidth - slotRight, t);
         
-        // Slot glow effect
-        ctx.shadowColor = '#ff6600';
-        ctx.shadowBlur = 15;
-        ctx.strokeStyle = '#ff6600';
-        ctx.lineWidth = 2;
+        // Pulsing glow effect on slot
+        const glowIntensity = 0.5 + Math.sin(this.slotGlowPhase) * 0.3;
+        ctx.shadowColor = `rgba(255, 100, 0, ${glowIntensity})`;
+        ctx.shadowBlur = 20 + Math.sin(this.slotGlowPhase) * 10;
+        
+        // Slot edges with gradient
+        const slotGrad = ctx.createLinearGradient(slotLeft, centerY, slotRight, centerY);
+        slotGrad.addColorStop(0, '#ff6600');
+        slotGrad.addColorStop(0.5, '#ffaa00');
+        slotGrad.addColorStop(1, '#ff6600');
+        ctx.strokeStyle = slotGrad;
+        ctx.lineWidth = 3;
         ctx.beginPath();
-        ctx.moveTo(slotLeft, centerY - t / 2);
-        ctx.lineTo(slotLeft, centerY + t / 2);
-        ctx.moveTo(slotRight, centerY - t / 2);
-        ctx.lineTo(slotRight, centerY + t / 2);
+        ctx.moveTo(slotLeft, centerY - t / 2 - 2);
+        ctx.lineTo(slotLeft, centerY + t / 2 + 2);
+        ctx.moveTo(slotRight, centerY - t / 2 - 2);
+        ctx.lineTo(slotRight, centerY + t / 2 + 2);
         ctx.stroke();
+        
         ctx.shadowBlur = 0;
         
-        // Slot opening highlight
-        ctx.fillStyle = 'rgba(255, 100, 0, 0.15)';
-        ctx.fillRect(slotLeft, centerY - t, this.slotWidth, t * 2);
+        // Slot opening with radial gradient
+        const slotCenterX = this.boardWidth / 2;
+        const slotGlowGrad = ctx.createRadialGradient(slotCenterX, centerY, 0, slotCenterX, centerY, this.slotWidth);
+        slotGlowGrad.addColorStop(0, `rgba(255, 150, 0, ${glowIntensity * 0.4})`);
+        slotGlowGrad.addColorStop(0.5, `rgba(255, 100, 0, ${glowIntensity * 0.2})`);
+        slotGlowGrad.addColorStop(1, 'rgba(255, 100, 0, 0)');
+        ctx.fillStyle = slotGlowGrad;
+        ctx.fillRect(slotLeft, centerY - t * 2, this.slotWidth, t * 4);
+        
+        // Inner edge lighting
+        ctx.strokeStyle = `rgba(255, 200, 100, ${glowIntensity})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(slotLeft + 2, centerY - t / 2);
+        ctx.lineTo(slotLeft + 2, centerY + t / 2);
+        ctx.moveTo(slotRight - 2, centerY - t / 2);
+        ctx.lineTo(slotRight - 2, centerY + t / 2);
+        ctx.stroke();
     }
     
     drawAimLine() {
@@ -778,48 +1165,88 @@ class FastrackGame {
             const isSelected = puck === this.selectedPuck;
             const canMove = this.canIMovePuck(puck);
             
-            // Shadow
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
-            ctx.beginPath();
-            ctx.arc(x + 3, y + 3, r, 0, Math.PI * 2);
-            ctx.fill();
+            // Add trail for fast-moving pucks
+            const speed = Math.sqrt(puck.velocity.x * puck.velocity.x + puck.velocity.y * puck.velocity.y);
+            if (speed > 3) {
+                this.addPuckTrail(x, y, color);
+            }
             
-            // Selection ring
+            // Enhanced shadow with blur
+            ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
+            ctx.shadowBlur = 8;
+            ctx.shadowOffsetX = 4;
+            ctx.shadowOffsetY = 4;
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+            ctx.beginPath();
+            ctx.arc(x + 2, y + 2, r, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.shadowOffsetX = 0;
+            ctx.shadowOffsetY = 0;
+            
+            // Selection ring with glow
             if (isSelected) {
+                ctx.shadowColor = '#ffffff';
+                ctx.shadowBlur = 10;
                 ctx.strokeStyle = '#fff';
                 ctx.lineWidth = 3;
                 ctx.beginPath();
-                ctx.arc(x, y, r + 5, 0, Math.PI * 2);
+                ctx.arc(x, y, r + 6, 0, Math.PI * 2);
                 ctx.stroke();
+                ctx.shadowBlur = 0;
             }
             
-            // Puck body with gradient
-            const grad = ctx.createRadialGradient(x - r / 3, y - r / 3, 0, x, y, r);
-            grad.addColorStop(0, this.lightenColor(color, 50));
-            grad.addColorStop(1, color);
+            // 3D puck body with enhanced gradient
+            const grad = ctx.createRadialGradient(x - r / 2.5, y - r / 2.5, r * 0.1, x, y, r * 1.2);
+            grad.addColorStop(0, this.lightenColor(color, 80));
+            grad.addColorStop(0.3, this.lightenColor(color, 40));
+            grad.addColorStop(0.7, color);
+            grad.addColorStop(1, this.lightenColor(color, -40));
             ctx.fillStyle = grad;
             ctx.beginPath();
             ctx.arc(x, y, r, 0, Math.PI * 2);
             ctx.fill();
             
-            // Border
-            ctx.strokeStyle = this.lightenColor(color, -30);
+            // Rim lighting (edge highlight)
+            const rimGrad = ctx.createRadialGradient(x, y, r * 0.7, x, y, r);
+            rimGrad.addColorStop(0, 'rgba(255, 255, 255, 0)');
+            rimGrad.addColorStop(0.8, 'rgba(255, 255, 255, 0)');
+            rimGrad.addColorStop(1, 'rgba(255, 255, 255, 0.5)');
+            ctx.fillStyle = rimGrad;
+            ctx.beginPath();
+            ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Outer border with depth
+            ctx.strokeStyle = this.lightenColor(color, -50);
             ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(x, y, r - 1, 0, Math.PI * 2);
             ctx.stroke();
             
-            // Star emblem
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-            this.drawStar(x, y, r * 0.45, 5);
+            // Star emblem with embossed effect
+            ctx.save();
+            // Shadow for emboss
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+            this.drawStar(x + 1, y + 1, r * 0.4, 5);
+            // Highlight for emboss
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+            this.drawStar(x - 0.5, y - 0.5, r * 0.4, 5);
+            ctx.restore();
             
-            // Highlight
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+            // Glossy highlight (top-left shine)
+            const glossGrad = ctx.createRadialGradient(x - r / 2.5, y - r / 2.5, 0, x - r / 3, y - r / 3, r / 2);
+            glossGrad.addColorStop(0, 'rgba(255, 255, 255, 0.7)');
+            glossGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.3)');
+            glossGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+            ctx.fillStyle = glossGrad;
             ctx.beginPath();
-            ctx.arc(x - r / 3, y - r / 3, r / 4, 0, Math.PI * 2);
+            ctx.arc(x - r / 3, y - r / 3, r / 2.5, 0, Math.PI * 2);
             ctx.fill();
             
             // Dim pucks I can't move
             if (!canMove) {
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
                 ctx.beginPath();
                 ctx.arc(x, y, r, 0, Math.PI * 2);
                 ctx.fill();
