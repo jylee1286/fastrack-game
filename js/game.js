@@ -132,9 +132,11 @@ class FastrackGame {
         this.createBoard();
         this.createPucks(5);
         
-        // Start physics
+        // Only host runs physics — joiner receives state from host
         this.runner = Matter.Runner.create();
-        Matter.Runner.run(this.runner, this.engine);
+        if (this.isHost) {
+            Matter.Runner.run(this.runner, this.engine);
+        }
         
         // Start render loop
         this.render();
@@ -452,20 +454,23 @@ class FastrackGame {
         const maxPower = 150;
         const scale = Math.min(power / maxPower, 1) * 0.5;
         
-        Matter.Body.setVelocity(this.selectedPuck, {
-            x: dx * scale,
-            y: dy * scale
-        });
+        const vx = dx * scale;
+        const vy = dy * scale;
+        
+        if (this.isHost) {
+            // Host applies physics directly
+            Matter.Body.setVelocity(this.selectedPuck, { x: vx, y: vy });
+        } else {
+            // Joiner sends flick command to host (host applies physics)
+            network.send({
+                type: 'flick',
+                index: this.selectedPuck.puckIndex,
+                vx: vx,
+                vy: vy
+            });
+        }
         
         this.playSound(200 + power * 2, 0.1);
-        
-        // Send flick to opponent
-        network.send({
-            type: 'flick',
-            index: this.selectedPuck.puckIndex,
-            vx: dx * scale,
-            vy: dy * scale
-        });
         
         this.selectedPuck = null;
         this.dragStart = null;
@@ -473,18 +478,19 @@ class FastrackGame {
     }
     
     handleNetworkData(data) {
-        if (data.type === 'pucks') {
-            // Opponent sends their puck positions in their game coords
-            // Both players share the same coordinate system (host's perspective)
-            // so no flipping needed for physics — the flip is only visual
-            if (data.positions) {
-                data.positions.forEach((pos, i) => {
+        if (data.type === 'state') {
+            // Joiner receives authoritative state from host
+            if (!this.isHost && data.pucks) {
+                data.pucks.forEach((p, i) => {
                     if (i < this.allPucks.length) {
-                        Matter.Body.setPosition(this.allPucks[i], { x: pos.x, y: pos.y });
+                        Matter.Body.setPosition(this.allPucks[i], { x: p.x, y: p.y });
+                        Matter.Body.setVelocity(this.allPucks[i], { x: p.vx, y: p.vy });
+                        this.allPucks[i].ownerColor = p.color;
                     }
                 });
             }
         } else if (data.type === 'flick') {
+            // Host receives flick command from joiner
             const puck = this.allPucks.find(p => p.puckIndex === data.index);
             if (puck) {
                 Matter.Body.setVelocity(puck, { x: data.vx, y: data.vy });
@@ -497,15 +503,21 @@ class FastrackGame {
     }
     
     syncPucks() {
+        // Only the host sends state updates
+        if (!this.isHost) return;
+        
         const now = Date.now();
         if (now - this.lastSyncTime < this.syncInterval) return;
         this.lastSyncTime = now;
         
-        const positions = this.allPucks.map(p => ({
+        const pucks = this.allPucks.map(p => ({
             x: p.position.x,
-            y: p.position.y
+            y: p.position.y,
+            vx: p.velocity.x,
+            vy: p.velocity.y,
+            color: p.ownerColor
         }));
-        network.send({ type: 'pucks', positions });
+        network.send({ type: 'state', pucks });
     }
     
     checkWinCondition() {
@@ -604,8 +616,8 @@ class FastrackGame {
         const w = this.boardWidth;
         const h = this.boardHeight;
         
-        // Keep pucks in bounds
-        this.constrainPucks();
+        // Keep pucks in bounds (host only — joiner gets state from host)
+        if (this.isHost) this.constrainPucks();
         
         // Flip canvas for joiner so their side is at bottom
         ctx.save();
