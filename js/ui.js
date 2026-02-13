@@ -15,9 +15,9 @@ function showScreen(screenId) {
 }
 
 // Home Screen Handlers
-document.getElementById('create-btn').addEventListener('click', () => {
+document.getElementById('create-btn').addEventListener('click', async () => {
     // Create game and show lobby
-    const roomCode = network.createGame(
+    const roomCode = await network.createGame(
         onGameConnected,
         onGameDataReceived,
         onGameDisconnected
@@ -34,7 +34,7 @@ document.getElementById('join-btn').addEventListener('click', () => {
 });
 
 // Join Screen Handlers
-document.getElementById('join-submit-btn').addEventListener('click', () => {
+document.getElementById('join-submit-btn').addEventListener('click', async () => {
     const roomCode = document.getElementById('room-code-input').value.trim().toUpperCase();
     
     if (roomCode.length !== 6) {
@@ -42,10 +42,9 @@ document.getElementById('join-submit-btn').addEventListener('click', () => {
         return;
     }
     
-    // Clear error and attempt to join
     document.getElementById('join-error').textContent = 'Connecting...';
     
-    network.joinGame(
+    await network.joinGame(
         roomCode,
         onGameConnected,
         onGameDataReceived,

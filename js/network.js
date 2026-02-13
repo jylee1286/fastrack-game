@@ -1,46 +1,35 @@
-// Network Manager - PeerJS P2P Multiplayer
-const ICE_SERVERS = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    // Open Relay TURN servers (free, by Metered)
-    { urls: 'stun:stun.relay.metered.ca:80' },
-    {
-        urls: 'turn:global.relay.metered.ca:80',
-        username: 'e8dd65b92f6aee9de4a54917',
-        credential: '5VpEpiKnhp/rJugL'
-    },
-    {
-        urls: 'turn:global.relay.metered.ca:80?transport=tcp',
-        username: 'e8dd65b92f6aee9de4a54917',
-        credential: '5VpEpiKnhp/rJugL'
-    },
-    {
-        urls: 'turn:global.relay.metered.ca:443',
-        username: 'e8dd65b92f6aee9de4a54917',
-        credential: '5VpEpiKnhp/rJugL'
-    },
-    {
-        urls: 'turns:global.relay.metered.ca:443?transport=tcp',
-        username: 'e8dd65b92f6aee9de4a54917',
-        credential: '5VpEpiKnhp/rJugL'
-    }
-];
+// Network Manager - Supabase Realtime Broadcast
+// Uses Supabase Realtime channels for cross-device multiplayer (no P2P needed)
+
+const SUPABASE_URL = 'https://bihdbzbmqmgtrsipjywo.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJpaGRiemJtcW1ndHJzaXBqeXdvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA5Mzc5MTQsImV4cCI6MjA4NjUxMzkxNH0.F_mjiIIgqE6JtFHhOhk5twuOFdZLSvVIpOwCKJK6nbs';
 
 class NetworkManager {
     constructor() {
-        this.peer = null;
-        this.conn = null;
+        this.supabase = null;
+        this.channel = null;
         this.roomCode = null;
         this.isHost = false;
         this.connected = false;
+        this.playerId = Math.random().toString(36).substr(2, 9);
         this.onConnected = null;
         this.onDataReceived = null;
         this.onDisconnected = null;
     }
 
+    async initSupabase() {
+        if (this.supabase) return;
+        
+        const { createClient } = supabase;
+        this.supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+            realtime: {
+                params: { eventsPerSecond: 40 }
+            }
+        });
+    }
+
     generateRoomCode() {
-        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No ambiguous chars (0/O, 1/I)
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
         let code = '';
         for (let i = 0; i < 6; i++) {
             code += chars.charAt(Math.floor(Math.random() * chars.length));
@@ -48,147 +37,138 @@ class NetworkManager {
         return code;
     }
 
-    createGame(onConnected, onDataReceived, onDisconnected) {
+    async createGame(onConnected, onDataReceived, onDisconnected) {
         this.isHost = true;
         this.onConnected = onConnected;
         this.onDataReceived = onDataReceived;
         this.onDisconnected = onDisconnected;
         this.roomCode = this.generateRoomCode();
 
-        this.peer = new Peer('fastrack-' + this.roomCode, {
-            debug: 1,
-            config: { iceServers: ICE_SERVERS }
-        });
+        await this.initSupabase();
 
-        this.peer.on('open', (id) => {
-            console.log('Host peer ready:', id);
-        });
-
-        this.peer.on('connection', (conn) => {
-            console.log('Opponent connected');
-            this.conn = conn;
-            this.setupConnection();
-        });
-
-        this.peer.on('error', (err) => {
-            console.error('Host peer error:', err.type, err);
-            if (err.type === 'unavailable-id') {
-                // ID taken, regenerate
-                this.roomCode = this.generateRoomCode();
-                this.peer.destroy();
-                this.createGame(this.onConnected, this.onDataReceived, this.onDisconnected);
-                return;
-            }
-            if (this.onDisconnected) {
-                this.onDisconnected('Connection error: ' + err.type);
+        // Create a realtime channel for this room
+        this.channel = this.supabase.channel('fastrack-' + this.roomCode, {
+            config: {
+                broadcast: { self: false }
             }
         });
+
+        // Listen for game data
+        this.channel.on('broadcast', { event: 'game' }, (payload) => {
+            if (payload.payload.senderId !== this.playerId && this.onDataReceived) {
+                this.onDataReceived(payload.payload.data);
+            }
+        });
+
+        // Listen for player join
+        this.channel.on('broadcast', { event: 'join' }, (payload) => {
+            if (payload.payload.senderId !== this.playerId) {
+                console.log('Opponent joined!');
+                this.connected = true;
+                // Send confirmation
+                this.channel.send({
+                    type: 'broadcast',
+                    event: 'confirmed',
+                    payload: { senderId: this.playerId }
+                });
+                if (this.onConnected) this.onConnected();
+            }
+        });
+
+        // Listen for player leave
+        this.channel.on('broadcast', { event: 'leave' }, (payload) => {
+            if (payload.payload.senderId !== this.playerId) {
+                this.connected = false;
+                if (this.onDisconnected) this.onDisconnected('Opponent disconnected');
+            }
+        });
+
+        // Subscribe
+        const status = await this.channel.subscribe();
+        console.log('Host channel status:', status);
 
         return this.roomCode;
     }
 
-    joinGame(roomCode, onConnected, onDataReceived, onDisconnected) {
+    async joinGame(roomCode, onConnected, onDataReceived, onDisconnected) {
         this.isHost = false;
         this.roomCode = roomCode.toUpperCase().trim();
         this.onConnected = onConnected;
         this.onDataReceived = onDataReceived;
         this.onDisconnected = onDisconnected;
 
-        this.peer = new Peer({
-            debug: 1,
-            config: { iceServers: ICE_SERVERS }
+        await this.initSupabase();
+
+        this.channel = this.supabase.channel('fastrack-' + this.roomCode, {
+            config: {
+                broadcast: { self: false }
+            }
         });
 
-        const connectTimeout = setTimeout(() => {
+        // Listen for game data
+        this.channel.on('broadcast', { event: 'game' }, (payload) => {
+            if (payload.payload.senderId !== this.playerId && this.onDataReceived) {
+                this.onDataReceived(payload.payload.data);
+            }
+        });
+
+        // Listen for host confirmation
+        this.channel.on('broadcast', { event: 'confirmed' }, (payload) => {
+            if (payload.payload.senderId !== this.playerId) {
+                console.log('Host confirmed connection!');
+                this.connected = true;
+                if (this.onConnected) this.onConnected();
+            }
+        });
+
+        // Listen for player leave
+        this.channel.on('broadcast', { event: 'leave' }, (payload) => {
+            if (payload.payload.senderId !== this.playerId) {
+                this.connected = false;
+                if (this.onDisconnected) this.onDisconnected('Opponent disconnected');
+            }
+        });
+
+        // Subscribe then announce join
+        const status = await this.channel.subscribe();
+        console.log('Joiner channel status:', status);
+
+        // Announce that we joined
+        await this.channel.send({
+            type: 'broadcast',
+            event: 'join',
+            payload: { senderId: this.playerId }
+        });
+
+        // Timeout if host doesn't confirm
+        setTimeout(() => {
             if (!this.connected) {
-                console.error('Connection timed out');
                 if (this.onDisconnected) {
-                    this.onDisconnected('Connection timed out. Make sure the host has created the game and the code is correct.');
+                    this.onDisconnected('Room not found or host not responding. Check the code and try again.');
                 }
             }
-        }, 20000);
-
-        this.peer.on('open', (id) => {
-            console.log('Joiner peer ready:', id);
-            console.log('Connecting to:', 'fastrack-' + this.roomCode);
-            
-            this.conn = this.peer.connect('fastrack-' + this.roomCode, {
-                reliable: true
-            });
-            
-            this.conn.on('open', () => {
-                clearTimeout(connectTimeout);
-            });
-            
-            this.setupConnection();
-        });
-
-        this.peer.on('error', (err) => {
-            clearTimeout(connectTimeout);
-            console.error('Join peer error:', err.type, err);
-            
-            let msg = 'Failed to connect';
-            if (err.type === 'peer-unavailable') {
-                msg = 'Room not found. Check the code and make sure the host is waiting.';
-            } else if (err.type === 'network') {
-                msg = 'Network error. Check your internet connection and try again.';
-            } else if (err.type === 'server-error') {
-                msg = 'Server error. Try again in a moment.';
-            } else if (err.type === 'disconnected') {
-                msg = 'Disconnected from server. Retrying...';
-                // Try to reconnect
-                setTimeout(() => this.peer.reconnect(), 2000);
-                return;
-            }
-            
-            if (this.onDisconnected) {
-                this.onDisconnected(msg);
-            }
-        });
-    }
-
-    setupConnection() {
-        if (!this.conn) return;
-        
-        this.conn.on('open', () => {
-            console.log('Connection established!');
-            this.connected = true;
-            if (this.onConnected) this.onConnected();
-        });
-
-        this.conn.on('data', (data) => {
-            if (this.onDataReceived) this.onDataReceived(data);
-        });
-
-        this.conn.on('close', () => {
-            console.log('Connection closed');
-            this.connected = false;
-            if (this.onDisconnected) this.onDisconnected('Opponent disconnected');
-        });
-
-        this.conn.on('error', (err) => {
-            console.error('Connection error:', err);
-        });
+        }, 10000);
     }
 
     send(data) {
-        if (this.connected && this.conn && this.conn.open) {
-            try {
-                this.conn.send(data);
-            } catch (e) {
-                console.error('Send error:', e);
-            }
+        if (this.channel) {
+            this.channel.send({
+                type: 'broadcast',
+                event: 'game',
+                payload: { senderId: this.playerId, data }
+            });
         }
     }
 
     disconnect() {
-        if (this.conn) {
-            this.conn.close();
-            this.conn = null;
-        }
-        if (this.peer) {
-            this.peer.destroy();
-            this.peer = null;
+        if (this.channel) {
+            this.channel.send({
+                type: 'broadcast',
+                event: 'leave',
+                payload: { senderId: this.playerId }
+            });
+            this.supabase.removeChannel(this.channel);
+            this.channel = null;
         }
         this.connected = false;
         this.roomCode = null;

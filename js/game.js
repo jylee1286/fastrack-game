@@ -277,8 +277,8 @@ class FastrackGame {
         
         const wallOptions = { 
             isStatic: true, 
-            restitution: 0.8,
-            friction: 0.1,
+            restitution: 1.0,   // Perfect bounce off walls
+            friction: 0.0,      // No friction on walls — clean rebounds
             label: 'wall'
         };
         
@@ -327,9 +327,9 @@ class FastrackGame {
             
             // Puck on bottom side (host's side) — starts as host's color
             const bottomPuck = Bodies.circle(x, centerY + 100 + Math.random() * 50, this.puckRadius, {
-                restitution: 0.9,
-                friction: 0.01,
-                frictionAir: 0.02,
+                restitution: 0.95,   // High bounce between pucks
+                friction: 0.0,       // No surface friction — clean slides
+                frictionAir: 0.015,  // Slight air resistance so they eventually stop
                 density: 0.05,
                 label: 'puck'
             });
@@ -341,9 +341,9 @@ class FastrackGame {
             
             // Puck on top side (joiner's side) — starts as joiner's color
             const topPuck = Bodies.circle(x, centerY - 100 - Math.random() * 50, this.puckRadius, {
-                restitution: 0.9,
-                friction: 0.01,
-                frictionAir: 0.02,
+                restitution: 0.95,
+                friction: 0.0,
+                frictionAir: 0.015,
                 density: 0.05,
                 label: 'puck'
             });
