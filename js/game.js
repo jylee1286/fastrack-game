@@ -194,7 +194,6 @@ class FastrackGame {
     }
     
     startTimer() {
-        // Create or update timer display
         let timerEl = document.getElementById('game-timer');
         if (!timerEl) {
             timerEl = document.createElement('div');
@@ -208,7 +207,6 @@ class FastrackGame {
             this.timeRemaining--;
             timerEl.textContent = this.formatTime(this.timeRemaining);
             
-            // Tick-tock sound and flash when under 10 seconds
             if (this.timeRemaining <= 10) {
                 timerEl.classList.toggle('timer-urgent');
                 this.playTickSound();
@@ -216,7 +214,10 @@ class FastrackGame {
             
             if (this.timeRemaining <= 0) {
                 clearInterval(this.timerInterval);
-                this.handleTimeUp();
+                // ONLY host decides what happens when time is up
+                if (this.isHost) {
+                    this.handleTimeUp();
+                }
             }
         }, 1000);
     }
@@ -228,30 +229,34 @@ class FastrackGame {
     }
     
     handleTimeUp() {
+        // Only called by host — host is authoritative for game outcomes
         const centerY = this.boardHeight / 2;
-        let pucksOnMySide = 0;
-        let pucksOnOpponentSide = 0;
+        let hostSidePucks = 0;  // pucks on bottom (host's side)
+        let joinerSidePucks = 0; // pucks on top (joiner's side)
         
         for (const puck of this.allPucks) {
-            const onBottom = puck.position.y > centerY;
-            
-            if (this.isHost) {
-                if (onBottom) pucksOnMySide++;
-                else pucksOnOpponentSide++;
-            } else {
-                if (!onBottom) pucksOnMySide++;
-                else pucksOnOpponentSide++;
-            }
+            if (puck.position.y > centerY) hostSidePucks++;
+            else joinerSidePucks++;
         }
         
-        if (pucksOnMySide === pucksOnOpponentSide) {
-            // TIE — golden goal!
+        if (hostSidePucks === joinerSidePucks) {
+            // TIE — golden goal
+            network.send({ type: 'gameEvent', event: 'goldenGoal' });
             this.startGoldenGoal();
-        } else if (pucksOnMySide < pucksOnOpponentSide) {
-            // Fewer pucks on my side = I win (opponent has more)
-            this.endGame(true, `Time's up! You had ${pucksOnMySide} pucks, opponent had ${pucksOnOpponentSide}.`);
         } else {
-            this.endGame(false, `Time's up! You had ${pucksOnMySide} pucks, opponent had ${pucksOnOpponentSide}.`);
+            // Host wins if fewer pucks on host's side (bottom)
+            const hostWins = hostSidePucks < joinerSidePucks;
+            const detail = `Time's up! Bottom: ${hostSidePucks}, Top: ${joinerSidePucks}`;
+            
+            // Tell joiner the result (from joiner's perspective, it's flipped)
+            network.send({ 
+                type: 'gameEvent', 
+                event: 'gameOver',
+                joinerWon: !hostWins,
+                detail: `Time's up! You had ${joinerSidePucks} pucks, opponent had ${hostSidePucks}.`
+            });
+            
+            this.endGame(hostWins, `Time's up! You had ${hostSidePucks} pucks, opponent had ${joinerSidePucks}.`);
         }
     }
     
@@ -273,13 +278,9 @@ class FastrackGame {
         let timerEl = document.getElementById('game-timer');
         if (timerEl) timerEl.textContent = this.formatTime(this.timeRemaining);
         
-        // Show golden goal banner
         this.showBanner('⚡ GOLDEN GOAL ⚡', 'First to get their puck through wins!');
         
-        // Notify opponent
-        network.send({ type: 'goldenGoal' });
-        
-        // Restart timer
+        // Restart timer — only host decides timeout outcome
         this.timerInterval = setInterval(() => {
             this.timeRemaining--;
             if (timerEl) timerEl.textContent = this.formatTime(this.timeRemaining);
@@ -288,8 +289,11 @@ class FastrackGame {
             }
             if (this.timeRemaining <= 0) {
                 clearInterval(this.timerInterval);
-                // Golden goal timeout = draw
-                this.endGame(false, "Golden goal expired — it's a draw!");
+                if (this.isHost) {
+                    // Golden goal timeout = draw, both lose
+                    network.send({ type: 'gameEvent', event: 'gameOver', joinerWon: false, detail: "Golden goal expired — it's a draw!" });
+                    this.endGame(false, "Golden goal expired — it's a draw!");
+                }
             }
         }, 1000);
     }
@@ -533,6 +537,12 @@ class FastrackGame {
                         this.allPucks[i].ownerColor = p.color;
                     }
                 });
+                // Sync timer from host
+                if (data.time !== undefined) {
+                    this.timeRemaining = data.time;
+                    const timerEl = document.getElementById('game-timer');
+                    if (timerEl) timerEl.textContent = this.formatTime(data.time);
+                }
             }
         } else if (data.type === 'flick') {
             // Host receives flick command from joiner
@@ -542,8 +552,18 @@ class FastrackGame {
             }
         } else if (data.type === 'goal') {
             this.playSound(600, 0.15);
-        } else if (data.type === 'goldenGoal') {
-            // Opponent triggered golden goal — we should already be in sync
+        } else if (data.type === 'gameEvent') {
+            // Host sends authoritative game events to joiner
+            if (data.event === 'goldenGoal' && !this.isHost) {
+                this.startGoldenGoal();
+            } else if (data.event === 'gameOver' && !this.isHost) {
+                this.endGame(data.joinerWon, data.detail || '');
+            } else if (data.event === 'timerSync') {
+                // Keep joiner's timer in sync with host
+                this.timeRemaining = data.time;
+                const timerEl = document.getElementById('game-timer');
+                if (timerEl) timerEl.textContent = this.formatTime(data.time);
+            }
         }
     }
     
@@ -562,7 +582,7 @@ class FastrackGame {
             vy: p.velocity.y,
             color: p.ownerColor
         }));
-        network.send({ type: 'state', pucks });
+        network.send({ type: 'state', pucks, time: this.timeRemaining });
     }
     
     checkWinCondition() {
@@ -588,9 +608,25 @@ class FastrackGame {
         document.getElementById('your-score').textContent = pucksOnMySide;
         document.getElementById('opponent-score').textContent = pucksOnOpponentSide;
         
-        // In golden goal, first to clear their side wins
-        if (this.goldenGoal && pucksOnMySide === 0) {
-            this.endGame(true, 'Golden goal — you cleared your side!');
+        // In golden goal, host checks if either side cleared — host is authoritative
+        if (this.goldenGoal && this.isHost) {
+            const centerY = this.boardHeight / 2;
+            let hostSide = 0;
+            let joinerSide = 0;
+            for (const puck of this.allPucks) {
+                if (puck.position.y > centerY) hostSide++;
+                else joinerSide++;
+            }
+            
+            if (hostSide === 0) {
+                // Host cleared their side — host wins
+                network.send({ type: 'gameEvent', event: 'gameOver', joinerWon: false, detail: 'Golden goal — opponent cleared their side!' });
+                this.endGame(true, 'Golden goal — you cleared your side!');
+            } else if (joinerSide === 0) {
+                // Joiner cleared their side — joiner wins
+                network.send({ type: 'gameEvent', event: 'gameOver', joinerWon: true, detail: 'Golden goal — you cleared your side!' });
+                this.endGame(false, 'Golden goal — opponent cleared their side!');
+            }
         }
     }
     
