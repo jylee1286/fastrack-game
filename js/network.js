@@ -33,16 +33,19 @@ class NetworkManager {
 
         // Create peer with room code as ID
         this.peer = new Peer('fastrack-' + this.roomCode, {
+            debug: 2,
             config: {
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' }
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' },
+                    { urls: 'stun:stun3.l.google.com:19302' }
                 ]
             }
         });
 
         this.peer.on('open', (id) => {
-            console.log('Peer created with ID:', id);
+            console.log('Host peer created with ID:', id);
         });
 
         this.peer.on('connection', (conn) => {
@@ -53,6 +56,12 @@ class NetworkManager {
 
         this.peer.on('error', (err) => {
             console.error('Peer error:', err);
+            // If the ID is taken, try with a new code
+            if (err.type === 'unavailable-id') {
+                this.roomCode = this.generateRoomCode();
+                this.peer.destroy();
+                return this.createGame(this.onConnected, this.onDataReceived, this.onDisconnected);
+            }
             if (this.onDisconnected) {
                 this.onDisconnected('Connection error: ' + err.type);
             }
@@ -71,25 +80,55 @@ class NetworkManager {
 
         // Create peer
         this.peer = new Peer({
+            debug: 2,
             config: {
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' }
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' },
+                    { urls: 'stun:stun3.l.google.com:19302' }
                 ]
             }
         });
 
+        // Set a connection timeout
+        const connectTimeout = setTimeout(() => {
+            if (!this.connected) {
+                console.error('Connection timed out');
+                if (this.onDisconnected) {
+                    this.onDisconnected('Connection timed out. Check the room code and try again.');
+                }
+            }
+        }, 15000);
+
         this.peer.on('open', (id) => {
-            console.log('Peer created, connecting to:', 'fastrack-' + this.roomCode);
+            console.log('Joiner peer created with ID:', id);
+            console.log('Connecting to host:', 'fastrack-' + this.roomCode);
             // Connect to host
-            this.conn = this.peer.connect('fastrack-' + this.roomCode);
+            this.conn = this.peer.connect('fastrack-' + this.roomCode, {
+                reliable: true
+            });
             this.setupConnection();
+            
+            // Clear timeout on successful connection setup
+            this.conn.on('open', () => {
+                clearTimeout(connectTimeout);
+            });
         });
 
         this.peer.on('error', (err) => {
+            clearTimeout(connectTimeout);
             console.error('Peer error:', err);
+            let msg = 'Failed to connect';
+            if (err.type === 'peer-unavailable') {
+                msg = 'Room not found. Check the code and make sure the host is waiting.';
+            } else if (err.type === 'network') {
+                msg = 'Network error. Check your internet connection.';
+            } else if (err.type === 'server-error') {
+                msg = 'Server error. Try again in a moment.';
+            }
             if (this.onDisconnected) {
-                this.onDisconnected('Failed to connect: ' + err.type);
+                this.onDisconnected(msg);
             }
         });
     }
